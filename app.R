@@ -499,6 +499,143 @@ get_flca_labels_on_graph <- function(g) {
   as.integer(igraph::components(igraph::as.undirected(gg, mode = "collapse"))$membership[V(g)$name])
 }
 
+
+# Score-sensitive FLCA fallback used by the app when comparing maturity vs influence.
+# This keeps the older reduced/single-link evaluation basis, but makes the one-link
+# FLCA relation depend on the selected node score:
+#   value  = maturity
+#   value2 = influence
+make_score_sensitive_flca <- function(nodes, edges, cluster_by = c("value", "value2"), eps = 1e-6, tie_break_scale = 10000) {
+  cluster_by <- match.arg(cluster_by)
+  nd <- as.data.frame(nodes, stringsAsFactors = FALSE)
+  ed <- as.data.frame(edges, stringsAsFactors = FALSE)
+  validate(need(all(c("name", "value") %in% names(nd)), "Nodes must contain name and value."))
+  if (!"value2" %in% names(nd)) nd$value2 <- nd$value
+  nd$name <- trimws(as.character(nd$name))
+  nd$value <- suppressWarnings(as.numeric(nd$value))
+  nd$value2 <- suppressWarnings(as.numeric(nd$value2))
+  nd$value[!is.finite(nd$value)] <- 0
+  nd$value2[!is.finite(nd$value2)] <- nd$value[!is.finite(nd$value2)]
+  nd$flca_score <- if (identical(cluster_by, "value2")) nd$value2 else nd$value
+  nd$flca_score[!is.finite(nd$flca_score)] <- 0
+
+  # Standardize edges.
+  if (!all(c("Leader", "follower", "WCD") %in% names(ed))) {
+    ed <- clean_edges(ed)
+  }
+  ed$Leader <- trimws(as.character(ed$Leader))
+  ed$follower <- trimws(as.character(ed$follower))
+  ed$WCD <- suppressWarnings(as.numeric(ed$WCD))
+  ed <- ed[is.finite(ed$WCD) & ed$WCD > 0 & nzchar(ed$Leader) & nzchar(ed$follower) & ed$Leader != ed$follower, , drop = FALSE]
+
+  score_map <- setNames(nd$flca_score, nd$name)
+  ed$s1 <- suppressWarnings(as.numeric(score_map[ed$Leader]))
+  ed$s2 <- suppressWarnings(as.numeric(score_map[ed$follower]))
+  ed <- ed[is.finite(ed$s1) & is.finite(ed$s2), , drop = FALSE]
+
+  if (!nrow(ed)) {
+    g0 <- igraph::graph_from_data_frame(data.frame(from=character(0), to=character(0), WCD=numeric(0)), directed = FALSE, vertices = nd)
+    memb0 <- seq_len(igraph::vcount(g0)); names(memb0) <- igraph::V(g0)$name
+    return(list(graph = g0, membership = memb0, edges = data.frame(Leader=character(0), follower=character(0), WCD=numeric(0))))
+  }
+
+  # Direction is score-sensitive. Higher score becomes Leader; ties use name.
+  swap <- (ed$s2 > ed$s1) | (ed$s2 == ed$s1 & ed$follower < ed$Leader)
+  L <- ifelse(swap, ed$follower, ed$Leader)
+  F <- ifelse(swap, ed$Leader, ed$follower)
+  ed1 <- data.frame(Leader = L, follower = F, WCD = ed$WCD, stringsAsFactors = FALSE)
+  ed1$Leader_score <- suppressWarnings(as.numeric(score_map[ed1$Leader]))
+  ed1$Leader_score[!is.finite(ed1$Leader_score)] <- 0
+  tie_break_scale <- suppressWarnings(as.numeric(tie_break_scale)); if (!is.finite(tie_break_scale) || tie_break_scale <= 0) tie_break_scale <- 10000
+  ed1$WCD_adj <- ed1$WCD + ed1$Leader_score / tie_break_scale
+
+  # One-link rule: exactly one best incoming leader per follower.
+  ed_one <- ed1 |>
+    dplyr::group_by(follower) |>
+    dplyr::arrange(dplyr::desc(WCD_adj), dplyr::desc(Leader_score), Leader, .by_group = TRUE) |>
+    dplyr::slice(1) |>
+    dplyr::ungroup() |>
+    dplyr::select(Leader, follower, WCD)
+
+  vertex_df <- nd
+  g <- igraph::graph_from_data_frame(ed_one, vertices = vertex_df, directed = FALSE)
+  if (igraph::ecount(g) > 0) {
+    igraph::E(g)$weight <- igraph::E(g)$WCD
+    g <- igraph::simplify(g, remove.multiple = TRUE, remove.loops = TRUE,
+                          edge.attr.comb = list(weight = "sum", WCD = "sum"))
+    igraph::E(g)$weight <- pmax(igraph::E(g)$weight, eps)
+  }
+  memb <- as.integer(igraph::components(g)$membership)
+  names(memb) <- igraph::V(g)$name
+  list(graph = g, membership = memb, edges = ed_one, cluster_by = cluster_by)
+}
+
+score_sensitive_flca_quality <- function(nodes, edges, cluster_by = c("value", "value2"), tie_break_scale = 10000) {
+  cluster_by <- match.arg(cluster_by)
+  fl <- make_score_sensitive_flca(nodes, edges, cluster_by = cluster_by, tie_break_scale = tie_break_scale)
+  g <- fl$graph
+  memb <- as.integer(fl$membership[igraph::V(g)$name])
+  g_consistent <- make_flca_consistent_graph(g, memb)
+  memb_consistent <- as.integer(fl$membership[igraph::V(g_consistent)$name])
+  list(
+    mode = cluster_by,
+    graph = g,
+    graph_consistent = g_consistent,
+    membership = fl$membership,
+    edges = fl$edges,
+    n_clusters = length(unique(fl$membership[!is.na(fl$membership)])),
+    Q = safe_modularity(g_consistent, memb_consistent),
+    SS = silhouette_from_membership(g_consistent, memb_consistent, unreachable = "penalize")$mean_sil
+  )
+}
+
+
+make_flca_mode_annotation <- function(xres) {
+  if (is.null(xres) || is.null(xres$flca_maturity) || is.null(xres$flca_influence)) {
+    return("FLCA maturity/influence comparison is unavailable until analysis is run.")
+  }
+  m <- xres$flca_maturity
+  i <- xres$flca_influence
+
+  nm <- sort(unique(c(names(m$membership), names(i$membership))))
+  mem_m <- as.integer(m$membership[nm])
+  mem_i <- as.integer(i$membership[nm])
+  same_mem <- identical(mem_m, mem_i) || all(mem_m == mem_i, na.rm = TRUE)
+  same_count <- sum(mem_m == mem_i, na.rm = TRUE)
+  total_count <- sum(!is.na(mem_m) & !is.na(mem_i))
+
+  edge_key <- function(ed) {
+    if (is.null(ed) || !nrow(ed)) return(character(0))
+    a <- pmin(as.character(ed$Leader), as.character(ed$follower))
+    b <- pmax(as.character(ed$Leader), as.character(ed$follower))
+    sort(unique(paste(a, b, round(suppressWarnings(as.numeric(ed$WCD)), 8), sep = "||")))
+  }
+  ek_m <- edge_key(m$edges)
+  ek_i <- edge_key(i$edges)
+  same_edges <- identical(ek_m, ek_i)
+
+  q_same <- isTRUE(all.equal(m$Q, i$Q, tolerance = 1e-10))
+  ss_same <- isTRUE(all.equal(m$SS, i$SS, tolerance = 1e-10))
+
+  if (same_mem && same_edges && q_same && ss_same) {
+    paste0(
+      "Explanation of identical FLCA mode results: Maturity (value) and Influence (value2) produced the same one-link FLCA node membership and the same reduced-consistent edge structure in this dataset. ",
+      "Matched nodes: ", same_count, "/", total_count, ". Because modularity Q and silhouette SS are calculated from cluster membership plus the reduced-consistent graph, identical membership/edges necessarily produce identical Q and SS. ",
+      "In this case, changing the mode changes the interpretation of node priority, but not the final FLCA clusters."
+    )
+  } else if (same_mem && !same_edges) {
+    paste0(
+      "Explanation of similar FLCA mode results: the two modes produced the same final node membership (", same_count, "/", total_count,
+      " matched nodes), although the one-link edges are not fully identical. Since Q/SS mainly depend on the evaluated membership and graph, values may still be very close or identical after reduced-consistent filtering."
+    )
+  } else {
+    paste0(
+      "FLCA mode comparison: maturity and influence produced different node memberships. Matched nodes: ", same_count, "/", total_count,
+      ". Differences in Q/SS reflect changes in the value-based versus value2-based leader/follower priority."
+    )
+  }
+}
+
 as_int_membership <- function(x) as.integer(unname(x))
 
 safe_modularity <- function(g, memb) {
@@ -635,15 +772,19 @@ run_method <- function(g, method) {
   })
 }
 
-analyze_all <- function(nodes, edges, target_k = 4) {
+analyze_all <- function(nodes, edges, target_k = 4, flca_mode = "value", tie_break_scale = 10000) {
+  flca_mode <- ifelse(flca_mode %in% c("value", "value2"), flca_mode, "value")
   gr <- build_graphs(nodes, edges)
   g_full <- gr$g_full
-  g_flca <- gr$g_flca
   all_vertices <- V(g_full)$name
 
-  flca_carac <- get_flca_labels_on_graph(g_flca)
-  if (length(flca_carac) != vcount(g_flca)) flca_carac <- components(g_flca)$membership
-  names(flca_carac) <- V(g_flca)$name
+  flca_maturity  <- score_sensitive_flca_quality(nodes, edges, cluster_by = "value", tie_break_scale = tie_break_scale)
+  flca_influence <- score_sensitive_flca_quality(nodes, edges, cluster_by = "value2", tie_break_scale = tie_break_scale)
+  selected_flca <- if (identical(flca_mode, "value2")) flca_influence else flca_maturity
+
+  g_flca <- selected_flca$graph
+  edges_reduced <- selected_flca$edges
+  flca_carac <- selected_flca$membership
   flca_full <- as.integer(flca_carac[match(V(g_full)$name, names(flca_carac))])
 
   methods <- c("louvain", "optimal", "components", "edge_betweenness", "label_prop", "infomap", "leading_eigen", "walktrap", "fast_greedy")
@@ -683,15 +824,24 @@ analyze_all <- function(nodes, edges, target_k = 4) {
     )
   }
 
-  g_flca_consistent <- make_flca_consistent_graph(g_flca, as.integer(flca_carac[V(g_flca)$name]))
   quality_df <- add_row(
     quality_df,
-    method = "FLCA",
-    n_clusters = length(unique(flca_full[!is.na(flca_full)])),
-    modularity = safe_modularity(g_flca_consistent, as.integer(flca_carac[V(g_flca)$name])),
-    mean_silhouette = silhouette_from_membership(g_flca_consistent, as.integer(flca_carac[V(g_flca)$name]), unreachable = "penalize")$mean_sil,
+    method = "FLCA by maturity",
+    n_clusters = flca_maturity$n_clusters,
+    modularity = flca_maturity$Q,
+    mean_silhouette = flca_maturity$SS,
     ARI_vs_FLCA = NA_real_, NMI_vs_FLCA = NA_real_, status = "ok",
-    details = "Deploy-safe max-link FLCA fallback; evaluated on FLCA-consistent reduced graph.",
+    details = "Score-sensitive one-link FLCA; mode=value (maturity); reduced_consistent",
+    eval_graph = "reduced_consistent"
+  )
+  quality_df <- add_row(
+    quality_df,
+    method = "FLCA by influence",
+    n_clusters = flca_influence$n_clusters,
+    modularity = flca_influence$Q,
+    mean_silhouette = flca_influence$SS,
+    ARI_vs_FLCA = NA_real_, NMI_vs_FLCA = NA_real_, status = "ok",
+    details = "Score-sensitive one-link FLCA; mode=value2 (influence); reduced_consistent",
     eval_graph = "reduced_consistent"
   )
 
@@ -710,13 +860,13 @@ analyze_all <- function(nodes, edges, target_k = 4) {
     status = "ok", details = "Weak edges dropped until target number of components is reached.", eval_graph = "thresholded_full"
   )
 
-  ranking_df <- quality_df %>% filter(method != "FLCA") %>% arrange(desc(ARI_vs_FLCA), desc(NMI_vs_FLCA), desc(modularity))
+  ranking_df <- quality_df %>% filter(!grepl("^FLCA", method)) %>% arrange(desc(ARI_vs_FLCA), desc(NMI_vs_FLCA), desc(modularity))
 
   list(
     nodes = nodes, edges = edges, vertex_df = gr$vertex_df,
-    g_full = g_full, g_flca = g_flca, edges_reduced = gr$edges_reduced,
+    g_full = g_full, g_flca = g_flca, edges_reduced = edges_reduced,
     memberships_df = memberships_df, quality_df = quality_df, ranking_df = ranking_df,
-    flca_carac = flca_carac
+    flca_carac = flca_carac, flca_mode = flca_mode, flca_maturity = flca_maturity, flca_influence = flca_influence
   )
 }
 
@@ -883,7 +1033,7 @@ make_visnetwork <- function(g, memb = NULL, title = "Network", label_font_size =
 # -----------------------------
 # FLCA 6-step process helpers
 # -----------------------------
-make_flca_step_nodes <- function(xres, top_clusters = 6, n_per_cluster = 3, major_sampling = TRUE) {
+make_flca_step_nodes <- function(xres, top_clusters = 6, n_per_cluster = 3, major_sampling = TRUE, target_n = 20) {
   req(xres)
   g <- xres$g_flca
   memb <- as.integer(xres$flca_carac[igraph::V(g)$name])
@@ -939,7 +1089,8 @@ make_flca_step_nodes <- function(xres, top_clusters = 6, n_per_cluster = 3, majo
     nd$wsel <- NA_real_
   }
 
-  target_n <- 20L
+  target_n <- suppressWarnings(as.integer(target_n))
+  if (!is.finite(target_n) || target_n <= 0) target_n <- 20L
   if (isTRUE(major_sampling)) {
     # FLCA-MA rule: first sample top clusters, then force-fill to target_n.
     # Therefore, if at least 20 FLCA nodes exist, the selected Top20 must contain 20 members.
@@ -1020,15 +1171,47 @@ make_flca_cluster_summary <- function(step) {
 
 make_flca_results_for_ssplot <- function(step) {
   sm <- make_flca_cluster_summary(step)
+
+  # Compute real weighted/unweighted modularity values for the SSplot.
+  # Previous restored version used NA for Qw/Qu; renderSSplot then displayed 0.00.
+  qtab <- tryCatch({
+    if (exists("compute_modularity_by_cluster", mode = "function")) {
+      compute_modularity_by_cluster(step$nodes, step$edges)
+    } else {
+      NULL
+    }
+  }, error = function(e) NULL)
+
+  q_overall_w <- NA_real_
+  q_overall_u <- NA_real_
+  q_per <- data.frame(carac = integer(0), Qw_cluster = numeric(0), Qu_cluster = numeric(0))
+
+  if (is.data.frame(qtab) && nrow(qtab) > 0) {
+    q_overall_w <- suppressWarnings(as.numeric(attr(qtab, "Qw_total")))
+    q_overall_u <- suppressWarnings(as.numeric(attr(qtab, "Qu_total")))
+    q_per <- as.data.frame(qtab, stringsAsFactors = FALSE)
+  }
+
+  if (!is.finite(q_overall_w)) q_overall_w <- NA_real_
+  if (!is.finite(q_overall_u)) q_overall_u <- NA_real_
+
+  sm$Qw <- suppressWarnings(as.numeric(q_per$Qw_cluster[match(as.integer(sm$carac), as.integer(q_per$carac))]))
+  sm$Qu <- suppressWarnings(as.numeric(q_per$Qu_cluster[match(as.integer(sm$carac), as.integer(q_per$carac))]))
+
+  # Keep NA if modularity cannot be computed; do not silently convert missing Q to zero.
   overall <- data.frame(
     Cluster = "OVERALL",
     SS = mean(step$nodes$sil_width, na.rm = TRUE),
-    Qw = NA_real_, Qu = NA_real_, stringsAsFactors = FALSE
+    Qw = q_overall_w,
+    Qu = q_overall_u,
+    stringsAsFactors = FALSE
   )
   per <- data.frame(
     Cluster = paste0("C", sm$carac),
     SS = sm$mean_silhouette,
-    Qw = NA_real_, Qu = NA_real_, stringsAsFactors = FALSE
+    Qw = sm$Qw,
+    Qu = sm$Qu,
+    stringsAsFactors = FALSE
   )
   rbind(overall, per)
 }
@@ -1319,8 +1502,8 @@ plot_flca_chord_base <- function(step) {
 # -----------------------------
 ui <- fluidPage(
   tags$head(tags$style(HTML("\n    body { background:#fafafa; }\n    .box { background:white; border:1px solid #ddd; border-radius:12px; padding:14px; margin-bottom:14px; }\n    .note { color:#666; font-size:13px; }\n    textarea { font-family: Consolas, 'Courier New', monospace; }
-    .nav-tabs > li > a[data-value='FLCA Process'], .nav-tabs > li > a[data-value='Visual Quality'], .nav-tabs > li > a[data-value='ReadMe'] { color:#d62728 !important; font-weight:800; }
-    .nav-tabs > li.active > a[data-value='FLCA Process'], .nav-tabs > li.active > a[data-value='Visual Quality'], .nav-tabs > li.active > a[data-value='ReadMe'] { border-top:4px solid #d62728 !important; }\n  "))),
+    .nav-tabs > li > a[data-value='FLCA Process'], .nav-tabs > li > a[data-value='Visual Quality'], .nav-tabs > li > a[data-value='Parameters'], .nav-tabs > li > a[data-value='ReadMe'] { color:#d62728 !important; font-weight:800; }
+    .nav-tabs > li.active > a[data-value='FLCA Process'], .nav-tabs > li.active > a[data-value='Visual Quality'], .nav-tabs > li.active > a[data-value='Parameters'], .nav-tabs > li.active > a[data-value='ReadMe'] { border-top:4px solid #d62728 !important; }\n  "))),
   titlePanel("FLCA and Community Clustering Comparison"),
   sidebarLayout(
     sidebarPanel(
@@ -1343,6 +1526,18 @@ ui <- fluidPage(
                            tags$label("Edges CSV — headers optional; first 2 columns=endpoints, 3rd=weight"),
                            textAreaInput("edges_txt", NULL, value = default_edges_txt, rows = 10, width = "100%")),
           numericInput("target_k", "Target k for independent components", value = 4, min = 2, max = 20, step = 1),
+          radioButtons("flca_mode", "FLCA mode for network outputs",
+                       choices = c("Maturity (value)" = "value", "Influence (value2)" = "value2"),
+                       selected = "value", inline = FALSE),
+          tags$hr(),
+          h4("Reviewer-required parameter settings"),
+          numericInput("occurrence_top_n", "Occurrence input: top N nodes before edge generation", value = 100, min = 20, max = 1000, step = 10),
+          numericInput("flca_min_cluster_size", "FLCA minimum cluster size", value = 3, min = 1, max = 20, step = 1),
+          numericInput("flca_target_n", "FLCA-MA final target nodes", value = 20, min = 5, max = 100, step = 1),
+          numericInput("sil_intra_delta", "Silhouette missing intra-cluster penalty", value = 2, min = 0, max = 20, step = 0.5),
+          numericInput("sil_inter_delta", "Silhouette missing inter-cluster penalty", value = 5, min = 0, max = 30, step = 0.5),
+          numericInput("tie_break_scale", "Tie-break scale: leader score / scale", value = 10000, min = 100, max = 1000000, step = 100),
+          p(class = "note", "These controls expose the FLCA parameters requested by reviewers. Some values document fixed algorithmic rules used by the FLCA module and are exported in the Parameters tab for reproducibility."),
           numericInput("label_font_size", "Network label font size", value = 30, min = 12, max = 60, step = 2),
           checkboxInput("label_bold", "Bold network labels", value = TRUE),
           actionButton("run", "Run analysis", class = "btn-primary")
@@ -1374,6 +1569,29 @@ ui <- fluidPage(
                  div(class = "box",
                      h3("FLCA 6-step visual process"),
                      p(class = "note", "This red tab shows the FLCA pipeline from source graph to leader-follower interpretation. Major sampling follows the FLCA controls in the sidebar / FLCA Reduced tab.")),
+                 div(class = "box",
+                     h4("Download list for FLCA Process outputs"),
+                     p(class = "note", "Use these buttons to export the selected FLCA Process tables and publication-style plot PNGs generated under the current maturity/influence mode and major-sampling settings."),
+                     fluidRow(
+                       column(3, downloadButton("download_flca_process_selected_nodes", "Selected nodes CSV")),
+                       column(3, downloadButton("download_flca_process_all_nodes", "All FLCA nodes CSV")),
+                       column(3, downloadButton("download_flca_process_edges", "Leader-follower edges CSV")),
+                       column(3, downloadButton("download_flca_process_cluster_summary", "Cluster summary CSV"))
+                     ),
+                     br(),
+                     fluidRow(
+                       column(3, downloadButton("download_flca_process_aac", "AAC summary CSV")),
+                       column(3, downloadButton("download_flca_process_ssplot", "SSplot PNG")),
+                       column(3, downloadButton("download_flca_process_kano", "Kano PNG")),
+                       column(3, downloadButton("download_flca_process_chord", "Circular chord PNG"))
+                     ),
+                     br(),
+                     fluidRow(
+                       column(3, downloadButton("download_flca_sankeymatic_txt", "SankeyMATIC TXT")),
+                       column(3, downloadButton("download_flca_sankeymatic_nodes", "SankeyMATIC nodes CSV")),
+                       column(3, downloadButton("download_flca_sankeymatic_edges", "SankeyMATIC edges CSV")),
+                       column(3, downloadButton("download_flca_process_chord_edges", "Chord edges CSV"))
+                     )),
                  div(class = "box", h4("Step 1. Input nodes and weighted co-word/collaboration edges"),
                      fluidRow(column(6, DTOutput("flca_step1_nodes")), column(6, DTOutput("flca_step1_edges")))),
                  div(class = "box", h4("Step 2. Full weighted graph before FLCA"),
@@ -1386,12 +1604,8 @@ ui <- fluidPage(
                      uiOutput("flca_step5_sankey")),
                  div(class = "box", h4("Step 5b. SankeyMATIC code for sankeymatic.com"),
                      p(class = "note", "Copy this code into sankeymatic.com. Links use FLCA selected leader-follower edges; color definitions use the selected FLCA nodes and cluster colors."),
-                     fluidRow(
-                       column(4, downloadButton("download_flca_sankeymatic_txt", "Download SankeyMATIC TXT")),
-                       column(4, downloadButton("download_flca_sankeymatic_nodes", "Download SankeyMATIC nodes CSV")),
-                       column(4, downloadButton("download_flca_sankeymatic_edges", "Download SankeyMATIC edges CSV"))
-                     ),
-                     br(), uiOutput("flca_step5_sankeymatic_code")),
+                     p(class = "note", "Download buttons for SankeyMATIC TXT/nodes/edges are provided in the FLCA Process Download list above."),
+                     uiOutput("flca_step5_sankeymatic_code")),
                  div(class = "box", h4("Step 6. Real SSplot: cohesion, AAC, and cluster summary"),
                      plotOutput("flca_step6_ssplot", height = "920px", width = "100%")),
                  div(class = "box", h4("Step 7. Kano plot for selected FLCA nodes"),
@@ -1408,7 +1622,9 @@ ui <- fluidPage(
                      plotOutput("flca_step9_chord", height = "820px", width = "100%"))),
         tabPanel("Memberships", br(), div(class = "box", DTOutput("tbl_memberships")),
                  div(class = "box", downloadButton("download_memberships", "Download memberships CSV"))),
-        tabPanel("Quality", br(), div(class = "box", DTOutput("tbl_quality")),
+        tabPanel("Quality", br(),
+                 div(class = "box", h4("FLCA maturity vs influence annotation"), uiOutput("flca_mode_annotation")),
+                 div(class = "box", DTOutput("tbl_quality")),
                  div(class = "box", downloadButton("download_quality", "Download quality CSV"))),
         tabPanel("Ranking", br(), div(class = "box", DTOutput("tbl_ranking")),
                  div(class = "box", downloadButton("download_ranking", "Download ranking CSV"))),
@@ -1419,6 +1635,16 @@ ui <- fluidPage(
                      plotOutput("plot_visual_quality_kano", height = "700px")),
                  div(class = "box", h4("Kano input table"), DTOutput("tbl_visual_quality_kano")),
                  div(class = "box", downloadButton("download_visual_quality_kano", "Download visual-quality Kano CSV"))),
+        tabPanel("Parameters", br(),
+                 div(class = "box",
+                     h3("Reproducible parameter settings"),
+                     p(class = "note", "This table records the initialization, arguments, tuning parameters, and fixed rules used for FLCA, FLCA-MA sampling, silhouette evaluation, and benchmark clustering. It is intended to support the Methods and Limitations revisions requested by reviewers."),
+                     downloadButton("download_parameters", "Download parameter settings CSV"),
+                     br(), br(),
+                     DTOutput("tbl_parameters")),
+                 div(class = "box",
+                     h4("How to report these settings in Methods"),
+                     verbatimTextOutput("parameter_methods_text"))),
         tabPanel("ReadMe", br(),
                  div(class = "box",
                      h3("ReadMe: FLCA and community clustering comparison app"),
@@ -1454,7 +1680,7 @@ server <- function(input, output, session) {
       if (isTRUE(use_coword)) {
         validate(need(!is.null(input$occurrence_file), "Upload a co-word occurrence CSV first."))
         occ_raw <- read_occurrence_file(input$occurrence_file$datapath)
-        built <- build_coword_from_occurrence(occ_raw)
+        built <- build_coword_from_occurrence(occ_raw, top_n_nodes = input$occurrence_top_n %||% 100)
         nodes <- built$nodes
         edges <- built$edges
         data_mode <- paste0("co-word occurrence converted to nodes/edges (", built$mode, ")")
@@ -1491,7 +1717,7 @@ server <- function(input, output, session) {
     dat <- input_data()
     withProgress(message = "Running clustering analysis...", value = 0, {
       incProgress(0.2, detail = "Building full and reduced graphs")
-      out <- analyze_all(dat$nodes, dat$edges, target_k = input$target_k)
+      out <- analyze_all(dat$nodes, dat$edges, target_k = input$target_k, flca_mode = input$flca_mode %||% "value", tie_break_scale = input$tie_break_scale %||% 10000)
       incProgress(1, detail = "Done")
       out
     })
@@ -1547,7 +1773,8 @@ Edges: ", nrow(input_data()$edges)) })
     )
     make_visnetwork(
       ss$graph, ss$membership,
-      paste0("Interactive FLCA dashboard | major sampling=", input$flca_major_sampling,
+      paste0("Interactive FLCA dashboard | mode=", ifelse(identical(res()$flca_mode, "value2"), "Influence (value2)", "Maturity (value)"),
+             " | major sampling=", input$flca_major_sampling,
              " | nodes=", igraph::vcount(ss$graph)),
       label_font_size = input$label_font_size, label_bold = input$label_bold
     )
@@ -1560,7 +1787,8 @@ Edges: ", nrow(input_data()$edges)) })
       res(),
       top_clusters = input$flca_top_clusters %||% 6,
       n_per_cluster = input$flca_n_per_cluster %||% 3,
-      major_sampling = isTRUE(input$flca_major_sampling)
+      major_sampling = isTRUE(input$flca_major_sampling),
+      target_n = input$flca_target_n %||% 20
     )
   })
 
@@ -1634,6 +1862,102 @@ Edges: ", nrow(input_data()$edges)) })
     content = function(file) readr::write_csv(flca_sankeymatic_bundle()$edges, file),
     contentType = "text/csv"
   )
+
+  # ---- Download list for FLCA Process tab ----
+  output$download_flca_process_selected_nodes <- downloadHandler(
+    filename = function() paste0("flca_process_selected_nodes_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(flca_step()$nodes, file),
+    contentType = "text/csv"
+  )
+  output$download_flca_process_all_nodes <- downloadHandler(
+    filename = function() paste0("flca_process_all_nodes_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(flca_step()$all_nodes, file),
+    contentType = "text/csv"
+  )
+  output$download_flca_process_edges <- downloadHandler(
+    filename = function() paste0("flca_process_leader_follower_edges_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(make_flca_leader_follower_edges(flca_step()), file),
+    contentType = "text/csv"
+  )
+  output$download_flca_process_cluster_summary <- downloadHandler(
+    filename = function() paste0("flca_process_cluster_summary_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(make_flca_cluster_summary(flca_step()), file),
+    contentType = "text/csv"
+  )
+  output$download_flca_process_aac <- downloadHandler(
+    filename = function() paste0("flca_process_aac_summary_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(make_flca_kano_aac_summary(flca_step()), file),
+    contentType = "text/csv"
+  )
+  output$download_flca_process_chord_edges <- downloadHandler(
+    filename = function() paste0("flca_process_chord_edges_", Sys.Date(), ".csv"),
+    content = function(file) {
+      lf <- make_flca_leader_follower_edges(flca_step())
+      lf <- lf[order(-suppressWarnings(as.numeric(lf$WCD)), lf$Leader, lf$follower), , drop = FALSE]
+      readr::write_csv(lf, file)
+    },
+    contentType = "text/csv"
+  )
+  output$download_flca_process_ssplot <- downloadHandler(
+    filename = function() paste0("flca_process_ssplot_", Sys.Date(), ".png"),
+    content = function(file) {
+      st <- flca_step()
+      png(file, width = 1150, height = max(760, 90 + 34 * nrow(st$nodes)), res = 120)
+      on.exit(dev.off(), add = TRUE)
+      if (exists("render_panel", mode = "function")) {
+        render_panel(
+          sil_df = st$nodes,
+          nodes0 = st$all_nodes,
+          results = make_flca_results_for_ssplot(st),
+          nodes = st$nodes,
+          top_n = nrow(st$nodes),
+          font_scale = 0.70,
+          aac_side = "left",
+          footer_adj = 0
+        )
+      } else {
+        print(ggplot2::ggplot(st$nodes, ggplot2::aes(x = sil_width, y = reorder(name, sil_width), fill = factor(carac))) +
+                ggplot2::geom_col() + ggplot2::theme_minimal(base_size = 13) +
+                ggplot2::labs(x = "Silhouette width", y = NULL, fill = "Cluster"))
+      }
+    },
+    contentType = "image/png"
+  )
+  output$download_flca_process_kano <- downloadHandler(
+    filename = function() paste0("flca_process_kano_", Sys.Date(), ".png"),
+    content = function(file) {
+      st <- flca_step()
+      png(file, width = 1350, height = 760, res = 120)
+      on.exit(dev.off(), add = TRUE)
+      nd <- make_flca_kano_nodes(st)
+      aac <- make_flca_kano_aac_summary(st)
+      title_txt <- sprintf(
+        "FLCA Kano plot | AAC(value)=%.2f | AAC(value2)=%.2f",
+        suppressWarnings(as.numeric(aac$AAC_value[as.character(aac$carac) == "OVERALL"])),
+        suppressWarnings(as.numeric(aac$AAC_value2[as.character(aac$carac) == "OVERALL"]))
+      )
+      if (exists("plot_kano_real", mode = "function")) {
+        print(plot_kano_real(nd, title_txt = title_txt, visual_ratio = 1/2.2, label_size = 3.6) +
+                ggplot2::labs(x = "Edge/connectivity value2", y = "Node value"))
+      } else {
+        print(ggplot2::ggplot(nd, ggplot2::aes(x = value2, y = value, label = name, color = factor(carac))) +
+                ggplot2::geom_point(size = 4) + ggrepel::geom_text_repel(max.overlaps = 200) +
+                ggplot2::theme_minimal(base_size = 13) +
+                ggplot2::labs(title = title_txt, x = "Edge/connectivity value2", y = "Node value", color = "FLCA cluster"))
+      }
+    },
+    contentType = "image/png"
+  )
+  output$download_flca_process_chord <- downloadHandler(
+    filename = function() paste0("flca_process_circular_chord_", Sys.Date(), ".png"),
+    content = function(file) {
+      png(file, width = 1050, height = 820, res = 120)
+      on.exit(dev.off(), add = TRUE)
+      plot_flca_chord_base(flca_step())
+    },
+    contentType = "image/png"
+  )
+
   output$flca_step6_ssplot <- renderPlot({
     req(flca_step())
     st <- flca_step()
@@ -1701,7 +2025,84 @@ Edges: ", nrow(input_data()$edges)) })
     plot_flca_chord_base(flca_step())
   }, width = 1050, height = 820, res = 120)
 
+
+  parameter_settings <- reactive({
+    data.frame(
+      component = c(
+        "Input preprocessing", "Input preprocessing", "FLCA initialization", "FLCA direction rule",
+        "FLCA mode", "Leader-follower one-link rule", "Tie-breaking rule", "Tie-breaking scale",
+        "True leader rule", "Minimum cluster size", "FLCA-MA top-cluster selection", "FLCA-MA base sampling",
+        "FLCA-MA final target", "FLCA-MA force-fill", "Independent components comparator",
+        "Silhouette missing intra-cluster penalty", "Silhouette missing inter-cluster penalty", "Silhouette unreachable-node handling",
+        "Benchmark algorithms", "Evaluation metrics", "Random seed"
+      ),
+      setting = c(
+        "Flexible CSV headers are normalized to name/value/value2/carac and Leader/follower/WCD.",
+        paste0("For occurrence input, top ", input$occurrence_top_n %||% 100, " nodes are retained before co-word edge generation."),
+        "Nodes are sorted by descending active FLCA score; ties are ordered alphabetically by node name.",
+        "For each edge, the higher-scored endpoint is assigned as Leader and the lower-scored endpoint as follower.",
+        ifelse(identical(input$flca_mode, "value2"), "cluster_by = value2 (influence mode)", "cluster_by = value (maturity mode)"),
+        "For each follower, only the strongest incoming leader link is retained.",
+        "Ties are resolved by maximum WCD, then higher leader score, then leader name/rank.",
+        paste0("WCD_adj = WCD + leader_score / ", input$tie_break_scale %||% 10000, " for deterministic ranking only."),
+        "Nodes with at least two followers are treated as true leaders; the top-scored node is always retained as a leader.",
+        paste0("Small clusters are reported/controlled using minimum cluster size = ", input$flca_min_cluster_size %||% 3, "."),
+        paste0("Top clusters selected = ", input$flca_top_clusters %||% 6, ", ranked by cluster size and total active score."),
+        paste0("Base sampling per selected cluster = ", input$flca_n_per_cluster %||% 3, " node(s), sorted by active score."),
+        paste0("Final FLCA-MA target_n = ", input$flca_target_n %||% 20, " selected nodes."),
+        "If the base sample is smaller than target_n, remaining positions are filled round-robin from selected clusters, then by global active-score ranking.",
+        paste0("components_independent uses target_k = ", input$target_k %||% 4, " by progressively removing weak edges."),
+        paste0("intra_delta = ", input$sil_intra_delta %||% 2, " for missing within-cluster distances when the FLCA module silhouette routine is used."),
+        paste0("inter_delta = ", input$sil_inter_delta %||% 5, " for missing between-cluster distances when the FLCA module silhouette routine is used."),
+        "Reduced-graph silhouette uses weighted shortest-path distance; unreachable nodes are penalized rather than silently ignored in FLCA quality summaries.",
+        "louvain, optimal, components, edge_betweenness, label_prop, infomap, leading_eigen, walktrap, fast_greedy, and components_independent_k.",
+        "Modularity Q, mean silhouette score, ARI versus FLCA, and NMI versus FLCA are reported in the Quality tab.",
+        "set.seed(123) for deterministic demo layout and stable tie handling."
+      ),
+      reviewer_relevance = c(
+        "initialization", "scalability/filtering", "initialization", "algorithmic specification",
+        "parameter", "algorithmic specification", "parameter", "parameter",
+        "algorithmic specification", "parameter/restriction", "major-sampling parameter", "major-sampling parameter",
+        "major-sampling parameter", "information-loss clarification", "benchmark parameter",
+        "silhouette parameter", "silhouette parameter", "metric interpretation",
+        "algorithm-selection rationale", "metric interpretation", "reproducibility"
+      ),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  output$tbl_parameters <- renderDT({
+    datatable(parameter_settings(), options = list(scrollX = TRUE, pageLength = 25))
+  })
+
+  output$download_parameters <- downloadHandler(
+    filename = function() paste0("flca_parameter_settings_", Sys.Date(), ".csv"),
+    content = function(file) readr::write_csv(parameter_settings(), file),
+    contentType = "text/csv"
+  )
+
+  output$parameter_methods_text <- renderText({
+    paste0(
+      "FLCA was initialized by sorting nodes in descending order according to the active score selected by cluster_by. ",
+      "The maturity mode uses value, whereas the influence mode uses value2. For each weighted edge, the higher-scored endpoint was treated as the leader and the lower-scored endpoint as the follower. ",
+      "Each follower retained a single strongest leader link based on maximum WCD, with deterministic tie-breaking by leader score and leader rank/name. ",
+      "The FLCA-MA visualization subset selected the top ", input$flca_top_clusters %||% 6,
+      " clusters, sampled at least ", input$flca_n_per_cluster %||% 3,
+      " node(s) per selected cluster, and force-filled the final subset to target_n = ", input$flca_target_n %||% 20,
+      ". Small-cluster behavior was documented using a minimum cluster size of ", input$flca_min_cluster_size %||% 3,
+      ". Silhouette evaluation used weighted graph distances; missing intra- and inter-cluster distances were controlled by intra_delta = ", input$sil_intra_delta %||% 2,
+      " and inter_delta = ", input$sil_inter_delta %||% 5,
+      ", respectively, where applicable. Because FLCA performance can vary with network density, node filtering, cluster-number reduction, and these parameter settings, this dependency is reported as a methodological limitation."
+    )
+  })
+
   output$tbl_memberships <- renderDT({ req(res()); datatable(res()$memberships_df, options = list(scrollX = TRUE, pageLength = 20)) })
+  output$flca_mode_annotation <- renderUI({
+    req(res())
+    txt <- make_flca_mode_annotation(res())
+    div(class = "note", style = "font-size:14px; color:#333; line-height:1.5;", txt)
+  })
+
   output$tbl_quality <- renderDT({ req(res()); datatable(res()$quality_df, options = list(scrollX = TRUE, pageLength = 20)) })
   output$tbl_ranking <- renderDT({ req(res()); datatable(res()$ranking_df, options = list(scrollX = TRUE, pageLength = 20)) })
 
