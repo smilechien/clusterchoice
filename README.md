@@ -468,6 +468,28 @@ ClusterChoice v2.0: Live FIFA 2026 online results as reproducible network demos 
 ```
 
 ---
+# FIFA 2026 Prediction Pathway Module
+
+The FIFA 2026 prediction module demonstrates how a live sports-result network can be extended beyond descriptive visualization into a reproducible knockout-stage simulation workflow. After the app generates or updates the current FIFA 2026 team table, the module estimates a knockout pathway from the Round of 32 through the Final and Third-place match.
+
+The module is activated only when the user clicks **Run FIFA 2026 prediction plot**, preventing automatic plotting during data loading and ensuring that the simulation is based on the current Table 1 nodes.
+
+The prediction score combines current tournament performance and a mixed prior strength indicator:
+
+```r
+mixed_prior = 0.5 * Elo_norm +
+              0.3 * FIFA_norm +
+              0.2 * History_norm
+
+prediction_score = 0.7 * points_norm +
+                   0.3 * mixed_prior +
+                   random_noise
+```
+
+The app first selects the top two teams from each of the 12 groups, then adds the best eight third-place teams to form the Round-of-32 field. Winners are simulated using seed-controlled probability sampling, allowing the same input table and seed to reproduce the same prediction pathway.
+
+Outputs include the prediction seed note, champion, runner-up, third-place team, full match pathway table, stage-wise SS and Q table, browser-rendered prediction bracket, and high-resolution PNG download.
+::: 
 
 ## 👨‍💻 Author
 
