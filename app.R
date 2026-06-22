@@ -1,10 +1,10 @@
-# app.R — V31 TRUE REBUILD: FIFA Group A-L summary uses hyperlink labels, not visible raw URLs
+# app.R — V34 TRUE REBUILD: wider Step 6b Kano plot under SSplot
 # If this line is not shown by readLines(app.R, n=1), R is loading an old file.
 
 options(shiny.maxRequestSize = 50 * 1024^2)
 options(install.packages.compile.from.source = "never")
 
-required_pkgs <- c("shiny", "DT", "igraph", "visNetwork", "RColorBrewer", "ggplot2", "dplyr", "tibble", "ggrepel")
+required_pkgs <- c("shiny", "DT", "igraph", "visNetwork", "RColorBrewer", "ggplot2", "dplyr", "tidyr", "tibble", "ggrepel")
 missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
 if (length(missing_pkgs) > 0) {
   stop("Missing required packages: ", paste(missing_pkgs, collapse = ", "),
@@ -21,11 +21,12 @@ suppressPackageStartupMessages({
   library(RColorBrewer)
   library(ggplot2)
   library(dplyr)
+  library(tidyr)
   library(tibble)
   library(ggrepel)
 })
 
-message("*** LOADED V30 TRUE REBUILD at ", Sys.time(), " ***")
+message("*** LOADED V32 TRUE REBUILD at ", Sys.time(), " ***")
 
 
 # ---- Embedded real SSplot renderer from renderSSplot(82).R ------------------
@@ -1204,7 +1205,248 @@ make_fifa_group_performance_summary <- function(nodes, reporting_date = Sys.time
   })
   out <- do.call(rbind, rows)
   rownames(out) <- NULL
+
   out
+}
+
+# ---- FIFA 2026 Golden Boot scorer table and slopegraph -----------------------
+# Goal-scorer data are parsed from the Wikipedia footballbox scorer fields when
+# those fields are available.  If the current pages do not contain scorer lists,
+# the app returns an explanatory empty table rather than stopping the analysis.
+empty_golden_boot_summary <- function(message = "No FIFA 2026 scorer-level data were parsed from the current Wikipedia pages.") {
+  data.frame(
+    reporting_date = as.character(Sys.time()),
+    rank = NA_integer_,
+    player = message,
+    team = "",
+    group = "",
+    goals = NA_integer_,
+    stringsAsFactors = FALSE
+  )
+}
+
+empty_golden_boot_slope <- function(message = "No slopegraph is available because no scorer-level data were parsed.") {
+  data.frame(
+    reporting_date = as.character(Sys.time()),
+    player_label = message,
+    year = "Current",
+    value = 0,
+    stringsAsFactors = FALSE
+  )
+}
+
+clean_fifa_scorer_name <- function(x) {
+  x <- as.character(x)
+  x <- gsub("\\[[^\\]]*\\]", "", x)
+  x <- gsub("\\(.*?\\)", "", x)
+  # remove minute patterns and everything after the first minute marker
+  x <- gsub("\\s+[0-9]+(\\+[0-9]+)?\\s*['’′].*$", "", x)
+  x <- gsub("\\s+[0-9]+(\\+[0-9]+)?\\s*(min|minute).*$", "", x, ignore.case = TRUE)
+  x <- gsub("[⚽•●]", "", x)
+  x <- trimws(x)
+  x
+}
+
+make_fifa_golden_boot_summary <- function(scorers, reporting_date = Sys.time(), top_n = 30) {
+  if (is.null(scorers) || !is.data.frame(scorers) || nrow(scorers) == 0) {
+    return(empty_golden_boot_summary())
+  }
+  sc <- safe_df(scorers)
+  if (!all(c("player","team","group","goals") %in% names(sc))) {
+    return(empty_golden_boot_summary("Scorer table exists, but required columns player/team/group/goals are missing."))
+  }
+  sc$goals <- suppressWarnings(as.numeric(sc$goals))
+  sc$goals[!is.finite(sc$goals) | is.na(sc$goals)] <- 0
+  sc$player <- trimws(as_utf8(sc$player))
+  sc$team <- trimws(as_utf8(sc$team))
+  sc$group <- trimws(as_utf8(sc$group))
+  sc <- sc[nzchar(sc$player) & sc$goals > 0, , drop = FALSE]
+  if (nrow(sc) == 0) return(empty_golden_boot_summary())
+
+  out <- sc |>
+    dplyr::group_by(player, team, group) |>
+    dplyr::summarise(goals = sum(goals, na.rm = TRUE), .groups = "drop") |>
+    dplyr::arrange(dplyr::desc(goals), team, player) |>
+    as.data.frame(stringsAsFactors = FALSE)
+  out$rank <- seq_len(nrow(out))
+  out$reporting_date <- format(as.POSIXct(reporting_date), "%Y-%m-%d %H:%M:%S")
+  out <- out[, c("reporting_date", "rank", "player", "team", "group", "goals"), drop = FALSE]
+  if (is.finite(top_n) && nrow(out) > top_n) out <- out[seq_len(top_n), , drop = FALSE]
+  out
+}
+
+make_fifa_golden_boot_slope_data <- function(scorers, reporting_date = Sys.time(), top_n = 10, max_steps = 6) {
+  if (is.null(scorers) || !is.data.frame(scorers) || nrow(scorers) == 0) {
+    return(empty_golden_boot_slope())
+  }
+  sc <- safe_df(scorers)
+  if (!all(c("player","team","goals","match_order") %in% names(sc))) {
+    return(empty_golden_boot_slope("Scorer table exists, but match-order data required for a slopegraph are missing."))
+  }
+  sc$goals <- suppressWarnings(as.numeric(sc$goals))
+  sc$match_order <- suppressWarnings(as.integer(sc$match_order))
+  sc$goals[!is.finite(sc$goals) | is.na(sc$goals)] <- 0
+  sc <- sc[nzchar(sc$player) & is.finite(sc$match_order) & sc$goals > 0, , drop = FALSE]
+  if (nrow(sc) == 0) return(empty_golden_boot_slope())
+
+  final <- sc |>
+    dplyr::group_by(player, team) |>
+    dplyr::summarise(total_goals = sum(goals, na.rm = TRUE), .groups = "drop") |>
+    dplyr::arrange(dplyr::desc(total_goals), team, player) |>
+    as.data.frame(stringsAsFactors = FALSE)
+  if (nrow(final) == 0) return(empty_golden_boot_slope())
+  final <- final[seq_len(min(top_n, nrow(final))), , drop = FALSE]
+  final$player_label <- paste0(final$player, " (", final$team, ")")
+
+  steps_all <- sort(unique(sc$match_order))
+  if (length(steps_all) > max_steps) {
+    idx <- unique(round(seq(1, length(steps_all), length.out = max_steps)))
+    steps <- steps_all[idx]
+  } else {
+    steps <- steps_all
+  }
+
+  rows <- list()
+  kk <- 0L
+  for (ii in seq_len(nrow(final))) {
+    player <- final$player[ii]
+    team <- final$team[ii]
+    plab <- final$player_label[ii]
+    for (st in steps) {
+      kk <- kk + 1L
+      rows[[kk]] <- data.frame(
+        reporting_date = format(as.POSIXct(reporting_date), "%Y-%m-%d %H:%M:%S"),
+        player_label = plab,
+        match_order = as.integer(st),
+        year = paste0("M", st),
+        value = sum(sc$goals[sc$player == player & sc$team == team & sc$match_order <= st], na.rm = TRUE),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  out <- do.call(rbind, rows)
+  out$year <- factor(out$year, levels = paste0("M", steps))
+  out
+}
+
+
+# Helper for Golden Boot slopegraph x-axis ordering.
+# M6 means the 6th parsed completed match in the Wikipedia footballbox order;
+# it is not Group F.  This function prevents character sorting such as
+# M1, M12, M17, ..., M6 and forces numeric order: M1, M6, M12, ...
+match_label_number <- function(x) {
+  suppressWarnings(as.integer(gsub("[^0-9]", "", as.character(x))))
+}
+
+order_match_labels_numeric <- function(x) {
+  ux <- unique(as.character(x))
+  nx <- match_label_number(ux)
+  ux[order(ifelse(is.na(nx), Inf, nx), ux)]
+}
+
+# Tufte-style spacing adapted from the user's requested slopegraph code.
+tufte_sort_cc <- function(df, x = "year", y = "value", group = "player_label", min.space = 0.08) {
+  ids <- match(c(x, y, group), names(df))
+  df <- df[, ids, drop = FALSE]
+  names(df) <- c("x", "y", "group")
+  df$x <- as.character(df$x)
+  df$group <- as.character(df$group)
+  df$y <- suppressWarnings(as.numeric(df$y))
+  df$y[!is.finite(df$y) | is.na(df$y)] <- 0
+
+  # Numeric match-order labels, not character labels.
+  x_order <- order_match_labels_numeric(df$x)
+  g_order <- unique(df$group)
+  tmp <- expand.grid(x = x_order, group = g_order, stringsAsFactors = FALSE)
+  tmp <- merge(tmp, df, by = c("x", "group"), all.x = TRUE, sort = FALSE)
+  tmp$y[is.na(tmp$y)] <- 0
+  tmp$x <- factor(tmp$x, levels = x_order)
+
+  # Wide matrix in the same numeric x-order.
+  wide <- reshape(tmp[, c("group", "x", "y"), drop = FALSE],
+                  idvar = "group", timevar = "x", direction = "wide", sep = "__")
+  ycols <- paste0("y__", x_order)
+  ycols <- ycols[ycols %in% names(wide)]
+  if (!length(ycols)) return(data.frame(group = character(0), x = character(0), y = numeric(0), ypos = numeric(0)))
+
+  # Put top Golden Boot contenders higher by ordering on the latest cumulative value,
+  # then on the earliest value and player label for deterministic display.
+  final_col <- ycols[length(ycols)]
+  first_col <- ycols[1]
+  ord <- order(wide[[final_col]], wide[[first_col]], wide$group, decreasing = FALSE, na.last = TRUE)
+  wide <- wide[ord, , drop = FALSE]
+
+  rng <- range(as.matrix(wide[, ycols, drop = FALSE]), na.rm = TRUE)
+  min.space <- min.space * diff(rng)
+  if (!is.finite(min.space) || min.space <= 0) min.space <- 0.08
+  yshift <- numeric(nrow(wide))
+  if (nrow(wide) >= 2) {
+    for (i in 2:nrow(wide)) {
+      mat <- as.matrix(wide[(i - 1):i, ycols, drop = FALSE])
+      d.min <- suppressWarnings(min(diff(mat), na.rm = TRUE))
+      if (!is.finite(d.min)) d.min <- min.space
+      yshift[i] <- ifelse(d.min < min.space, min.space - d.min, 0)
+    }
+  }
+  wide$yshift <- cumsum(yshift)
+
+  long <- reshape(wide, varying = ycols, v.names = "y", timevar = "x",
+                  times = sub("^y__", "", ycols), direction = "long")
+  long$x <- factor(as.character(long$x), levels = x_order)
+  long$ypos <- long$y + long$yshift
+  rownames(long) <- NULL
+  long
+}
+plot_fifa_golden_boot_slopegraph <- function(slope_df, line_size = 1) {
+  if (is.null(slope_df) || !is.data.frame(slope_df) || nrow(slope_df) == 0 ||
+      !"player_label" %in% names(slope_df) || !"value" %in% names(slope_df)) {
+    return(ggplot2::ggplot() + ggplot2::theme_void() +
+             ggplot2::labs(title = "The chase for the Golden Boot of FIFA 2026") +
+             ggplot2::annotate("text", x = 0, y = 0, label = "No scorer-level data available from current Wikipedia pages."))
+  }
+  df0 <- safe_df(slope_df)
+  df0$value <- suppressWarnings(as.numeric(df0$value))
+  df0$value[!is.finite(df0$value) | is.na(df0$value)] <- 0
+  if (length(unique(df0$player_label)) <= 1 && all(df0$value == 0)) {
+    msg <- unique(df0$player_label)[1]
+    return(ggplot2::ggplot() + ggplot2::theme_void() +
+             ggplot2::labs(title = "The chase for the Golden Boot of FIFA 2026") +
+             ggplot2::annotate("text", x = 0, y = 0, label = msg))
+  }
+  # Restore the original red-line slopegraph style, with wider vertical spacing
+  # so player labels and cumulative-goal values remain readable.
+  df <- tufte_sort_cc(df0, x = "year", y = "value", group = "player_label", min.space = 0.30)
+  if (!nrow(df)) {
+    return(ggplot2::ggplot() + ggplot2::theme_void() +
+             ggplot2::labs(title = "The chase for the Golden Boot of FIFA 2026") +
+             ggplot2::annotate("text", x = 0, y = 0, label = "No slopegraph data available."))
+  }
+  x_levels <- order_match_labels_numeric(df$x)
+  df$x <- factor(as.character(df$x), levels = x_levels)
+  first_x <- x_levels[1]
+  left_labs <- df[df$x == first_x, c("group","ypos"), drop = FALSE]
+  yr <- range(df$ypos, na.rm = TRUE)
+  if (!all(is.finite(yr))) yr <- c(0, 1)
+  ypad <- max(0.8, diff(yr) * 0.06)
+  ggplot2::ggplot(df, ggplot2::aes(x = x, y = ypos, group = group)) +
+    ggplot2::geom_line(colour = "red", linewidth = line_size, alpha = 0.80) +
+    ggplot2::geom_point(colour = "white", size = 7) +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.0f", y)), size = 3.2, family = "sans") +
+    ggplot2::scale_y_continuous(name = "", breaks = left_labs$ypos, labels = left_labs$group,
+                                limits = c(yr[1] - ypad, yr[2] + ypad)) +
+    ggplot2::labs(
+      title = "The chase for the Golden Boot of FIFA 2026",
+      subtitle = "Cumulative goals by parsed match order; rightmost values identify the current leading scorers",
+      x = "Parsed completed match order", y = NULL
+    ) +
+    ggplot2::theme_classic(base_family = "sans") +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5),
+      axis.text.y = ggplot2::element_text(face = "bold", size = 8.5, lineheight = 0.82),
+      axis.text.x = ggplot2::element_text(face = "bold"),
+      plot.margin = ggplot2::margin(15, 90, 25, 190)
+    )
 }
 
 fifa2026_readme_df <- function() {
@@ -1239,6 +1481,10 @@ write_fifa2026_xlsx <- function(file, nodes = fifa2026_nodes_demo_df(), edges = 
   openxlsx::writeData(wb, "validation", fifa2026_validation_df(nodes, edges))
   openxlsx::addWorksheet(wb, "group_performance_summary")
   openxlsx::writeData(wb, "group_performance_summary", make_fifa_group_performance_summary(nodes, reporting_date = Sys.time()))
+  openxlsx::addWorksheet(wb, "golden_boot")
+  openxlsx::writeData(wb, "golden_boot", empty_golden_boot_summary("Bundled/static FIFA workbook has no scorer-level online data. Click Update FIFA 2026 online and run."))
+  openxlsx::addWorksheet(wb, "golden_boot_slope")
+  openxlsx::writeData(wb, "golden_boot_slope", empty_golden_boot_slope("Bundled/static FIFA workbook has no scorer-level slopegraph data. Click Update FIFA 2026 online and run."))
   openxlsx::addWorksheet(wb, "README")
   openxlsx::writeData(wb, "README", fifa2026_readme_df())
   openxlsx::addWorksheet(wb, "sources")
@@ -1385,6 +1631,54 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
     }, error = function(e) NA_character_)
   }
 
+
+  safe_text_raw <- function(node, css) {
+    tryCatch({
+      y <- rvest::html_element(node, css)
+      if (inherits(y, "xml_missing")) return(NA_character_)
+      z <- rvest::html_text2(y)
+      if (!length(z) || is.na(z) || !nzchar(trimws(z))) return(NA_character_)
+      z
+    }, error = function(e) NA_character_)
+  }
+
+  extract_scorer_rows <- function(node, css, team, group, cluster, match_no_in_group, match_order, source_url) {
+    raw <- safe_text_raw(node, css)
+    if (is.na(raw) || !nzchar(raw)) return(data.frame())
+    raw <- stringr::str_replace_all(raw, "\\[[^\\]]*\\]", "")
+    parts <- unlist(strsplit(raw, "\\n|;"))
+    parts <- stringr::str_squish(parts)
+    parts <- parts[nzchar(parts)]
+    parts <- parts[!stringr::str_detect(tolower(parts), "report|attendance|referee|stadium|var|penalties")]
+    if (!length(parts)) return(data.frame())
+
+    out <- lapply(parts, function(line) {
+      line0 <- stringr::str_squish(line)
+      # Golden Boot normally excludes own goals; penalty goals still count.
+      if (stringr::str_detect(tolower(line0), "own goal|o\\.g\\.|og\\b")) return(NULL)
+      minute_hits <- stringr::str_extract_all(line0, "\\d+(\\+\\d+)?\\s*['’′]")[[1]]
+      goals <- length(minute_hits)
+      if (!is.finite(goals) || goals <= 0) goals <- 1L
+      player <- clean_fifa_scorer_name(line0)
+      if (!nzchar(player)) return(NULL)
+      data.frame(
+        player = player,
+        team = team,
+        group = group,
+        cluster = as.integer(cluster),
+        match_no_in_group = as.integer(match_no_in_group),
+        match_order = as.integer(match_order),
+        goals = as.integer(goals),
+        source_url = source_url,
+        raw_scorer_text = line0,
+        stringsAsFactors = FALSE
+      )
+    })
+    out <- out[!vapply(out, is.null, logical(1))]
+    if (!length(out)) return(data.frame())
+    do.call(rbind, out)
+  }
+
   clean_team_name <- function(x) {
     x <- stringr::str_replace_all(x, "\\[[^\\]]*\\]", "")
     x <- stringr::str_replace_all(x, "\\(H\\)|\\(A\\)|\\(Q\\)|\\(E\\)", "")
@@ -1399,7 +1693,9 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
   }
 
   all_matches <- list()
+  all_scorers <- list()
   k <- 0L
+  sk <- 0L
   pages_read <- 0L
   pages_with_completed_matches <- 0L
   for (ii in seq_len(nrow(group_urls))) {
@@ -1427,6 +1723,18 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
         score_text = stringr::str_squish(score), score1 = sc[1], score2 = sc[2],
         source_url = url, stringsAsFactors = FALSE
       )
+      # Optional scorer-level extraction for the Golden Boot table and slopegraph.
+      # Wikipedia footballbox pages commonly use .fhgoal and .fagoal for home/away scorer lists.
+      home_team_clean <- clean_team_name(team1)
+      away_team_clean <- clean_team_name(team2)
+      scorer_rows <- dplyr::bind_rows(
+        extract_scorer_rows(b, ".fhgoal", home_team_clean, g, cl, jj, k, url),
+        extract_scorer_rows(b, ".fagoal", away_team_clean, g, cl, jj, k, url)
+      )
+      if (nrow(scorer_rows) > 0) {
+        sk <- sk + 1L
+        all_scorers[[sk]] <- scorer_rows
+      }
     }
     if (k > k_before_group) pages_with_completed_matches <- pages_with_completed_matches + 1L
     progress(0.05 + ii / nrow(group_urls) * 0.58, paste0("Parsed Group ", g, "; cumulative matches = ", k))
@@ -1447,6 +1755,22 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
       team2_points = dplyr::case_when(score2 > score1 ~ 3L, score1 == score2 ~ 1L, TRUE ~ 0L)
     ) |>
     dplyr::arrange(cluster, match_no_in_group)
+
+  scorers_source <- if (length(all_scorers)) {
+    dplyr::bind_rows(all_scorers) |>
+      dplyr::filter(!is.na(player), nzchar(player), !is.na(team), nzchar(team), goals > 0) |>
+      dplyr::arrange(match_order, team, player) |>
+      as.data.frame(stringsAsFactors = FALSE)
+  } else {
+    data.frame(
+      player = character(0), team = character(0), group = character(0),
+      cluster = integer(0), match_no_in_group = integer(0),
+      match_order = integer(0), goals = integer(0),
+      source_url = character(0), raw_scorer_text = character(0),
+      stringsAsFactors = FALSE
+    )
+  }
+  progress(0.70, paste0("Parsed Golden Boot scorer rows: ", nrow(scorers_source)))
 
   progress(0.72, paste0("Building directed FIFA edges from ", nrow(matches_source), " completed matches"))
   win_edges <- matches_source |>
@@ -1511,23 +1835,28 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
   progress(0.88, "Validating totals and preparing group performance summary")
   reporting_date <- Sys.time()
   group_performance_summary <- make_fifa_group_performance_summary(nodes, reporting_date = reporting_date)
-  progress(0.90, "Preparing workbook sheets including Group A-L top-4 summary")
+  golden_boot_summary <- make_fifa_golden_boot_summary(scorers_source, reporting_date = reporting_date, top_n = 30)
+  golden_boot_slope <- make_fifa_golden_boot_slope_data(scorers_source, reporting_date = reporting_date, top_n = 10, max_steps = 6)
+  progress(0.90, "Preparing workbook sheets including Group A-L summary and Golden Boot chase")
   readme <- fifa2026_readme_df()
   sources <- group_urls
   online_run_info <- data.frame(
-    item = c("update_mode", "online_started_at", "online_completed_at", "pages_attempted", "pages_read", "pages_with_completed_matches", "completed_matches_parsed", "source_domain", "output_file"),
-    value = c("REAL online Wikipedia scrape; no bundled XLSX fallback", as.character(online_started_at), as.character(Sys.time()), as.character(nrow(group_urls)), as.character(pages_read), as.character(pages_with_completed_matches), as.character(nrow(matches_source)), "en.wikipedia.org", output_file),
+    item = c("update_mode", "online_started_at", "online_completed_at", "pages_attempted", "pages_read", "pages_with_completed_matches", "completed_matches_parsed", "scorer_rows_parsed", "source_domain", "output_file"),
+    value = c("REAL online Wikipedia scrape; no bundled XLSX fallback", as.character(online_started_at), as.character(Sys.time()), as.character(nrow(group_urls)), as.character(pages_read), as.character(pages_with_completed_matches), as.character(nrow(matches_source)), as.character(nrow(scorers_source)), "en.wikipedia.org", output_file),
     stringsAsFactors = FALSE
   )
   wb <- openxlsx::createWorkbook()
-  for (nm in c("nodes", "edges", "edges_detail", "matches_source", "team_groups", "validation", "group_performance_summary", "online_run_info", "README", "sources")) openxlsx::addWorksheet(wb, nm)
+  for (nm in c("nodes", "edges", "edges_detail", "matches_source", "scorers_source", "team_groups", "validation", "group_performance_summary", "golden_boot", "golden_boot_slope", "online_run_info", "README", "sources")) openxlsx::addWorksheet(wb, nm)
   openxlsx::writeData(wb, "nodes", nodes)
   openxlsx::writeData(wb, "edges", edges_xlsx)
   openxlsx::writeData(wb, "edges_detail", edges_detail)
   openxlsx::writeData(wb, "matches_source", matches_source)
+  openxlsx::writeData(wb, "scorers_source", scorers_source)
   openxlsx::writeData(wb, "team_groups", team_groups)
   openxlsx::writeData(wb, "validation", validation)
   openxlsx::writeData(wb, "group_performance_summary", group_performance_summary)
+  openxlsx::writeData(wb, "golden_boot", golden_boot_summary)
+  openxlsx::writeData(wb, "golden_boot_slope", golden_boot_slope)
   openxlsx::writeData(wb, "online_run_info", online_run_info)
   openxlsx::writeData(wb, "README", readme)
   openxlsx::writeData(wb, "sources", sources)
@@ -1540,10 +1869,13 @@ fetch_fifa2026_online_nodes_edges <- function(output_file = file.path(getwd(), "
   list(
     nodes = nodes,
     edges = edges_app,
-    data_mode = paste0("REAL online FIFA 2026 update from Wikipedia Group A-L pages; completed matches parsed: ", nrow(matches_source), "; pages read: ", pages_read, "/", nrow(group_urls), "; workbook saved: ", basename(output_file)),
-    online_details = paste0("ONLINE FIFA UPDATE: fetched current Wikipedia pages at ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "; pages read ", pages_read, "/", nrow(group_urls), "; pages with completed matches ", pages_with_completed_matches, "; matches parsed ", nrow(matches_source), "; output file ", basename(output_file)),
+    data_mode = paste0("REAL online FIFA 2026 update from Wikipedia Group A-L pages; completed matches parsed: ", nrow(matches_source), "; pages read: ", pages_read, "/", nrow(group_urls), "; scorer rows parsed: ", nrow(scorers_source), "; workbook saved: ", basename(output_file)),
+    online_details = paste0("ONLINE FIFA UPDATE: fetched current Wikipedia pages at ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "; pages read ", pages_read, "/", nrow(group_urls), "; pages with completed matches ", pages_with_completed_matches, "; matches parsed ", nrow(matches_source), "; scorer rows parsed ", nrow(scorers_source), "; output file ", basename(output_file)),
     online_run_info = online_run_info,
     group_performance_summary = group_performance_summary,
+    golden_boot_summary = golden_boot_summary,
+    golden_boot_slope = golden_boot_slope,
+    scorers_source = scorers_source,
     matches_source = matches_source
   )
 }
@@ -1807,9 +2139,15 @@ read_excel_workbook <- function(path) {
   ei <- which(sl %in% c("edges", "edge", "links", "link"))[1]
   ni <- which(sl %in% c("nodes", "node", "vertices", "vertex"))[1]
   if (is.na(ei)) stop("Workbook must contain an edges sheet.", call. = FALSE)
+  gp_i <- which(sl %in% c("group_performance_summary", "groupperformance", "fifa_group_summary"))[1]
+  gb_i <- which(sl %in% c("golden_boot", "goldenboot", "golden_boot_summary"))[1]
+  gs_i <- which(sl %in% c("golden_boot_slope", "goldenbootslope", "golden_boot_slopegraph"))[1]
   list(
     edges = safe_df(readxl::read_excel(path, sheet = sheets[ei])),
-    nodes = if (!is.na(ni)) safe_df(readxl::read_excel(path, sheet = sheets[ni])) else NULL
+    nodes = if (!is.na(ni)) safe_df(readxl::read_excel(path, sheet = sheets[ni])) else NULL,
+    group_performance_summary = if (!is.na(gp_i)) safe_df(readxl::read_excel(path, sheet = sheets[gp_i])) else NULL,
+    golden_boot_summary = if (!is.na(gb_i)) safe_df(readxl::read_excel(path, sheet = sheets[gb_i])) else NULL,
+    golden_boot_slope = if (!is.na(gs_i)) safe_df(readxl::read_excel(path, sheet = sheets[gs_i])) else NULL
   )
 }
 
@@ -1964,7 +2302,7 @@ analyze_basic <- function(nodes, edges, target_k = 4, flca_mode = "value") {
   list(nodes = gr$nodes, edges = gr$edges, vertex_df = gr$vertex_df, g_full = g, g_flca = gf, edges_reduced = gr$edges_reduced,
        memberships_df = mems, quality_df = qdf, ranking_df = ranking, flca_carac = fm_red, flca_full = fm,
        flca_mode = flca_mode, cluster_source = cluster_source, original_clusters_used = original_clusters_used,
-       status_note = paste0("V30 TRUE REBUILD: ", cluster_source, "; dataset1.csv demo, Excel nodes/edges upload, CSV coword upload, real renderSSplot(82), red tabs, dynamic Kano.R Q-vs-SS table, node-level Kano under SSplot."))
+       status_note = paste0("V36 TRUE REBUILD: ", cluster_source, "; dataset1.csv demo, Excel nodes/edges upload, CSV coword upload, real renderSSplot(82), red tabs, dynamic Kano.R Q-vs-SS table, node-level Kano under SSplot."))
 }
 
 make_vis <- function(g, membership = NULL, top_n = NULL, title = "Network", label_size = 30, bold = TRUE) {
@@ -2005,6 +2343,48 @@ make_vis <- function(g, membership = NULL, top_n = NULL, title = "Network", labe
     visNetwork::visInteraction(navigationButtons = TRUE, keyboard = TRUE)
 }
 
+
+# Static PNG network renderer for FLCA Process download buttons.
+plot_static_network_png <- function(g, membership = NULL, title = "Network", top_n = NULL) {
+  if (is.null(g) || igraph::vcount(g) == 0) {
+    plot.new(); text(0.5, 0.5, "No network available", cex = 1.2, font = 2); return(invisible(NULL))
+  }
+  if (!is.null(top_n) && is.finite(top_n) && top_n > 0 && top_n < igraph::vcount(g)) {
+    vals <- suppressWarnings(as.numeric(igraph::V(g)$value)); vals[!is.finite(vals)] <- 1
+    keep <- igraph::V(g)$name[order(-vals, igraph::V(g)$name)[seq_len(top_n)]]
+    g <- igraph::induced_subgraph(g, keep)
+  }
+  n <- igraph::vcount(g)
+  if (is.null(membership)) {
+    membership <- igraph::components(g)$membership
+  } else if (!is.null(names(membership)) && all(igraph::V(g)$name %in% names(membership))) {
+    membership <- membership[igraph::V(g)$name]
+  } else if (length(membership) != n) {
+    membership <- igraph::components(g)$membership
+  }
+  membership <- as.integer(membership)
+  membership[is.na(membership)] <- 1L
+  vals <- suppressWarnings(as.numeric(igraph::V(g)$value)); vals[!is.finite(vals)] <- 1
+  node_cex <- pmax(0.8, pmin(3.2, sqrt(pmax(vals, 0)) / max(sqrt(pmax(vals, 0)), na.rm = TRUE) * 2.7 + 0.5))
+  lev <- sort(unique(membership))
+  pal <- grDevices::hcl.colors(max(3, length(lev)), "Dark 3")
+  colmap <- setNames(pal[seq_along(lev)], as.character(lev))
+  vcols <- unname(colmap[as.character(membership)])
+  ew <- if (igraph::ecount(g) > 0) suppressWarnings(as.numeric(igraph::E(g)$weight)) else numeric(0)
+  if (length(ew)) ew <- pmax(1, pmin(8, log1p(ew) * 2.2))
+  set.seed(123)
+  lay <- igraph::layout_with_fr(g, weights = if (igraph::ecount(g) > 0) igraph::E(g)$weight else NULL)
+  op <- par(mar = c(1, 1, 3, 1))
+  on.exit(par(op), add = TRUE)
+  plot(g, layout = lay, vertex.color = vcols, vertex.size = 8 + node_cex * 9,
+       vertex.label = igraph::V(g)$name, vertex.label.cex = 0.75,
+       vertex.label.color = "black", vertex.frame.color = "white",
+       edge.width = ew, edge.color = grDevices::adjustcolor("#0050B5", alpha.f = 0.55),
+       main = title)
+  invisible(NULL)
+}
+
+
 community_methods <- c("louvain", "optimal", "components", "edge_betweenness", "label_prop", "infomap", "leading_eigen", "walktrap", "fast_greedy")
 
 
@@ -2016,13 +2396,30 @@ sil_widths_vec <- function(g, m) {
   n <- igraph::vcount(g)
   m <- norm_mem(m, n)
   if (n < 2 || length(unique(m)) < 2 || igraph::ecount(g) == 0) return(rep(0, n))
+
+  # V35 fix for externally preserved clusters such as FIFA groups.
+  # In FIFA group-stage data there are usually no cross-group edges. The old
+  # code replaced all disconnected distances with the same constant, so the
+  # distance from a team to another FIFA group could become effectively the same
+  # as the distance to an unplayed team inside its own group. That made group SS
+  # artificially low and made the inter-group separation look like zero.
+  # Here, disconnected pairs in different clusters are treated as farther apart
+  # than disconnected pairs inside the same preserved cluster.
   tryCatch({
     w <- if (igraph::ecount(g) > 0) suppressWarnings(as.numeric(igraph::E(g)$weight)) else numeric(0)
     w[!is.finite(w) | w <= 0] <- 1e-6
     D <- igraph::distances(g, weights = 1 / w)
-    mx <- max(D[is.finite(D)], na.rm = TRUE)
+    mx <- max(D[is.finite(D) & D > 0], na.rm = TRUE)
     if (!is.finite(mx) || mx <= 0) mx <- 1
-    D[!is.finite(D)] <- mx * 1.25
+
+    bad <- !is.finite(D)
+    if (any(bad)) {
+      same_cluster <- outer(m, m, FUN = "==")
+      D[bad & same_cluster] <- mx * 1.25
+      D[bad & !same_cluster] <- mx * 3.00
+    }
+    diag(D) <- 0
+
     s <- numeric(n)
     for (i in seq_len(n)) {
       same <- which(m == m[i])
@@ -2192,6 +2589,69 @@ make_real_ssplot <- function(xres, target_n = 20) {
 }
 
 
+
+
+# ---- Shared Top-N selector: leader-first, max 4 nodes per final cluster -------
+# This selector is used by Step 6 SSplot and Step 6c chord so that both panels
+# contain exactly the same final node set. It first takes the highest-value
+# leader from each cluster, then fills remaining positions round-robin with the
+# next highest-value members, never taking more than max_per_cluster from any
+# cluster.
+select_top_n_max_per_cluster <- function(df, target_n = 20, max_per_cluster = 4) {
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  if (!nrow(df)) return(df)
+  if (!all(c("name", "carac") %in% names(df))) stop("select_top_n_max_per_cluster requires name and carac columns.")
+  if (!"value" %in% names(df)) df$value <- 0
+  if (!"value2" %in% names(df)) df$value2 <- df$value
+  if (!"sil_width" %in% names(df)) df$sil_width <- 0
+
+  target_n <- suppressWarnings(as.integer(target_n))[1]
+  if (!is.finite(target_n) || target_n <= 0) target_n <- 20L
+  max_per_cluster <- suppressWarnings(as.integer(max_per_cluster))[1]
+  if (!is.finite(max_per_cluster) || max_per_cluster <= 0) max_per_cluster <- 4L
+
+  df$name <- trimws(as.character(df$name))
+  df$carac <- suppressWarnings(as.integer(gsub("^C", "", toupper(as.character(df$carac)))))
+  df$value <- suppressWarnings(as.numeric(df$value))
+  df$value2 <- suppressWarnings(as.numeric(df$value2))
+  df$sil_width <- suppressWarnings(as.numeric(df$sil_width))
+  df$value[!is.finite(df$value)] <- 0
+  df$value2[!is.finite(df$value2)] <- 0
+  df$sil_width[!is.finite(df$sil_width)] <- 0
+  df <- df[nzchar(df$name) & is.finite(df$carac), , drop = FALSE]
+  df <- df[!duplicated(df$name), , drop = FALSE]
+  if (!nrow(df)) return(df)
+
+  # V37 reviewer rule: global Top-N by nodes$value, but max 4 nodes per cluster.
+  # This avoids losing high-value leaders such as Germany, United States, and Mexico.
+  df_ord <- df[order(-df$value, -df$value2, -df$sil_width, df$name), , drop = FALSE]
+  picked <- character(0)
+  counts <- integer(0)
+  for (i in seq_len(nrow(df_ord))) {
+    if (length(picked) >= target_n) break
+    cl <- as.character(df_ord$carac[i])
+    if (is.na(counts[cl])) counts[cl] <- 0L
+    if (counts[cl] < max_per_cluster) {
+      picked <- c(picked, df_ord$name[i])
+      counts[cl] <- counts[cl] + 1L
+    }
+  }
+
+  # Last resort for very small datasets: if the cap cannot mathematically reach N,
+  # fill remaining positions by global value so the plot does not become short.
+  if (length(picked) < min(target_n, nrow(df_ord))) {
+    rest <- df_ord[!(df_ord$name %in% picked), , drop = FALSE]
+    picked <- c(picked, head(rest$name, min(target_n, nrow(df_ord)) - length(picked)))
+  }
+
+  out <- df[match(picked, df$name), , drop = FALSE]
+  out <- out[!is.na(out$name), , drop = FALSE]
+  out$selection_rank <- match(out$name, picked)
+  out <- out[order(out$selection_rank), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
 # ---- Adapter: build renderSSplot(82) inputs from current FLCA result ----------
 make_renderSSplot82_inputs <- function(xres, target_n = 20) {
   shiny::req(xres)
@@ -2272,9 +2732,14 @@ make_renderSSplot82_inputs <- function(xres, target_n = 20) {
 
   target_n <- suppressWarnings(as.integer(target_n))
   if (!is.finite(target_n) || target_n <= 0) target_n <- 20L
-  ord <- order(sil_df$carac, -sil_df$value, -sil_df$sil_width, sil_df$name)
-  selected_names <- sil_df$name[ord][seq_len(min(target_n, nrow(sil_df)))]
-  nodes20 <- nodes0[nodes0$name %in% selected_names, , drop = FALSE]
+
+  # V36: final Top-N selection is leader-first and capped at max 4 nodes per cluster.
+  # This prevents one high-scoring FIFA group from dominating the final Top-20.
+  # The same selected_sil_df is reused by Step 6 SSplot and Step 6c chord.
+  selected_sil_df <- select_top_n_max_per_cluster(
+    sil_df, target_n = target_n, max_per_cluster = 4L
+  )
+  nodes20 <- nodes0[match(selected_sil_df$name, nodes0$name), , drop = FALSE]
 
   q_w <- mod_safe(g, mem_raw)
   q_u <- mod_safe_unweighted(g, mem_raw)
@@ -2300,17 +2765,19 @@ make_renderSSplot82_inputs <- function(xres, target_n = 20) {
     n = c(nrow(sil_df), n_per),
     stringsAsFactors = FALSE
   )
-  list(sil_df = sil_df, nodes0 = nodes0, nodes20 = nodes20, results = results)
+  list(sil_df = sil_df, nodes0 = nodes0, nodes20 = nodes20, selected_sil_df = selected_sil_df, results = results)
 }
 
 render_real_SSplot82_panel <- function(xres, target_n = 20) {
   inp <- make_renderSSplot82_inputs(xres, target_n = target_n)
   render_panel(
-    sil_df = inp$sil_df,
-    nodes0 = inp$nodes0,
+    # V36: render exactly the capped leader-first final Top-N rows.
+    # Do not allow render_panel() to globally re-select by value/SS again.
+    sil_df = inp$selected_sil_df,
+    nodes0 = inp$nodes20,
     results = inp$results,
     nodes = inp$nodes20,
-    top_n = target_n,
+    top_n = nrow(inp$selected_sil_df),
     font_scale = 0.86,
     aac_side = "left",
     neighbor_side = "right",
@@ -2325,40 +2792,399 @@ render_real_SSplot82_panel <- function(xres, target_n = 20) {
 
 # ---- Adapter: Kano plot under the SSplot -------------------------------------
 # Plot value (y-axis) against value2 (x-axis) with FLCA cluster membership.
-make_flca_value_value2_kano <- function(xres, label_size = 4) {
-  g <- xres$g_full
-  shiny::validate(shiny::need(!is.null(g) && igraph::vcount(g) >= 2, "Kano plot requires at least two nodes."))
+make_flca_value_value2_kano <- function(xres, label_size = 3.6, visual_ratio = 0.10, target_n = 20) {
+  inp <- make_renderSSplot82_inputs(xres, target_n = target_n)
+  nd <- as.data.frame(inp$selected_sil_df, stringsAsFactors = FALSE)
+  shiny::validate(shiny::need(nrow(nd) >= 2, "Kano plot requires at least two selected Top-N nodes."))
 
-  nd <- data.frame(
-    name = igraph::V(g)$name,
-    value = suppressWarnings(as.numeric(igraph::V(g)$value)),
-    value2 = suppressWarnings(as.numeric(igraph::V(g)$value2)),
-    stringsAsFactors = FALSE
-  )
-  nd$value[!is.finite(nd$value)] <- 0
-  nd$value2[!is.finite(nd$value2)] <- 0
+  nd <- nd[, intersect(c("name", "value", "value2", "carac", "selection_rank"), names(nd)), drop = FALSE]
+  if (!"value" %in% names(nd)) nd$value <- 0
+  if (!"value2" %in% names(nd)) nd$value2 <- nd$value
+  if (!"carac" %in% names(nd)) nd$carac <- 1L
+  nd$value <- suppressWarnings(as.numeric(nd$value)); nd$value[!is.finite(nd$value)] <- 0
+  nd$value2 <- suppressWarnings(as.numeric(nd$value2)); nd$value2[!is.finite(nd$value2)] <- 0
+  nd$carac <- suppressWarnings(as.integer(nd$carac)); nd$carac[!is.finite(nd$carac)] <- 1L
 
-  mem <- xres$flca_full
-  if (!is.null(mem) && !is.null(names(mem)) && all(igraph::V(g)$name %in% names(mem))) {
-    mem <- mem[igraph::V(g)$name]
+  x_rng <- range(nd$value2, na.rm = TRUE)
+  y_rng <- range(nd$value,  na.rm = TRUE)
+  dx <- diff(x_rng); if (!is.finite(dx) || dx <= 0) dx <- 1
+  dy <- diff(y_rng); if (!is.finite(dy) || dy <= 0) dy <- 1
+  xlim_wide <- c(x_rng[1] - 2.8 * dx, x_rng[2] + 2.8 * dx)
+  ylim_wide <- c(y_rng[1] - 0.20 * dy, y_rng[2] + 0.20 * dy)
+
+  plot_kano_real(nodes = nd, title_txt = "Kano plot: same capped Top-20 nodes as SSplot/chord/Sankey", visual_ratio = visual_ratio, label_size = label_size) +
+    ggplot2::labs(x = "value2", y = "value") +
+    ggplot2::scale_x_continuous(limits = xlim_wide) +
+    ggplot2::scale_y_continuous(limits = ylim_wide) +
+    ggplot2::coord_cartesian(xlim = xlim_wide, ylim = ylim_wide, clip = "off") +
+    ggplot2::theme(plot.margin = ggplot2::margin(10, 160, 10, 100), legend.position = "right")
+}
+
+# ---- Shared selected Top-N graph bundle for all FLCA Process plots -----------
+make_flca_process_top_bundle <- function(xres, target_n = 20) {
+  inp <- make_renderSSplot82_inputs(xres, target_n = target_n)
+  nd <- as.data.frame(inp$selected_sil_df, stringsAsFactors = FALSE)
+  if (!nrow(nd)) stop("No selected Top-N nodes available.", call. = FALSE)
+  nd$name <- as.character(nd$name)
+  if (!"carac" %in% names(nd)) nd$carac <- 1L
+  nd$carac <- suppressWarnings(as.integer(nd$carac)); nd$carac[!is.finite(nd$carac)] <- 1L
+  if (!"value" %in% names(nd)) nd$value <- 1
+  if (!"value2" %in% names(nd)) nd$value2 <- nd$value
+  nd$value <- suppressWarnings(as.numeric(nd$value)); nd$value[!is.finite(nd$value)] <- 0
+  nd$value2 <- suppressWarnings(as.numeric(nd$value2)); nd$value2[!is.finite(nd$value2)] <- 0
+  top_names <- nd$name
+
+  clean_edge_safely <- function(ed) {
+    if (!is.data.frame(ed) || nrow(ed) == 0) return(data.frame(Leader = character(0), follower = character(0), WCD = numeric(0), stringsAsFactors = FALSE))
+    tryCatch(clean_edges(ed), error = function(e) {
+      nms <- names(ed); low <- tolower(nms)
+      a <- nms[which(low %in% c("leader", "term1", "from", "source"))[1] %||% 1]
+      b <- nms[which(low %in% c("follower", "term2", "to", "target"))[1] %||% 2]
+      w <- nms[which(low %in% c("wcd", "weight", "value"))[1] %||% NA_integer_]
+      data.frame(Leader = as.character(ed[[a]]), follower = as.character(ed[[b]]), WCD = if (!is.na(w)) suppressWarnings(as.numeric(ed[[w]])) else 1, stringsAsFactors = FALSE)
+    })
   }
-  if (is.null(mem) || length(mem) != igraph::vcount(g)) mem <- igraph::components(g)$membership
-  nd$carac <- suppressWarnings(as.integer(mem))
-  nd$carac[!is.finite(nd$carac) | is.na(nd$carac)] <- 1L
+  filter_top_edges <- function(ed) {
+    ed <- clean_edge_safely(ed); ed$WCD <- suppressWarnings(as.numeric(ed$WCD))
+    ed <- ed[is.finite(ed$WCD) & ed$WCD > 0 & ed$Leader %in% top_names & ed$follower %in% top_names, , drop = FALSE]
+    if (nrow(ed)) ed <- ed |> dplyr::group_by(Leader, follower) |> dplyr::summarise(WCD = sum(WCD, na.rm = TRUE), .groups = "drop") |> dplyr::arrange(match(Leader, top_names), match(follower, top_names), dplyr::desc(WCD)) |> as.data.frame(stringsAsFactors = FALSE)
+    ed
+  }
+  ed_reduced <- filter_top_edges(xres$edges_reduced)
+  ed_full <- filter_top_edges(xres$edges)
+  # V40 consistency rule: all FLCA Process plots must be based on the same
+  # selected Top-20 nodes AND the same raw node-edge table shown in the Data tab.
+  # Therefore the network, SankeyMATIC, Sankey blocks, and chord use the full
+  # filtered input edges first.  Reduced one-link edges are kept for reference
+  # but do not drive the displayed element set.
+  ed_plot <- if (nrow(ed_full)) ed_full else ed_reduced
+  edge_source <- if (nrow(ed_full)) "full input edges filtered to the identical Top-20 nodes" else "FLCA reduced one-link edges fallback"
+  vertices <- data.frame(name = nd$name, value = nd$value, value2 = nd$value2, carac = nd$carac, stringsAsFactors = FALSE)
+  g_top <- igraph::graph_from_data_frame(d = if (nrow(ed_plot)) data.frame(from = ed_plot$Leader, to = ed_plot$follower, weight = ed_plot$WCD, stringsAsFactors = FALSE) else data.frame(from = character(0), to = character(0), weight = numeric(0)), vertices = vertices, directed = FALSE)
+  igraph::V(g_top)$value <- vertices$value[match(igraph::V(g_top)$name, vertices$name)]
+  igraph::V(g_top)$value2 <- vertices$value2[match(igraph::V(g_top)$name, vertices$name)]
+  mem <- setNames(vertices$carac, vertices$name)
+  list(input = inp, nodes = nd, edges_full = ed_full, edges_reduced = ed_reduced, edges_plot = ed_plot, edge_source = edge_source, g = g_top, membership = mem)
+}
 
-  nd <- nd[is.finite(nd$value) & is.finite(nd$value2), , drop = FALSE]
-  shiny::validate(shiny::need(nrow(nd) >= 2, "Kano plot has fewer than two valid nodes after numeric cleaning."))
+make_flca_sankey_data <- function(xres, target_n = 20) {
+  # V44: Keep the original Top-20 nodes on BOTH Sankey sides, but build
+  # links and SankeyMATIC code from the exact final edge table used by Step 6c chord.
+  chd <- make_flca_chord_data(xres, target_n = target_n)
+  nd <- chd$nodes
+  ed <- chd$edges
+  if (!nrow(ed)) ed <- data.frame(Leader = character(0), follower = character(0), WCD = numeric(0), stringsAsFactors = FALSE)
+  ed$Leader <- as.character(ed$Leader)
+  ed$follower <- as.character(ed$follower)
+  ed$WCD <- suppressWarnings(as.numeric(ed$WCD)); ed$WCD[!is.finite(ed$WCD)] <- 0
+  ed <- ed[ed$WCD > 0, , drop = FALSE]
+  if (nrow(ed)) {
+    ed <- ed[order(match(ed$Leader, nd$name), match(ed$follower, nd$name), -ed$WCD), , drop = FALSE]
+  }
 
-  plot_kano_real(
+  # SankeyMATIC format follows sankeyplot(7).txt:
+  #   Leader [value] follower #000000
+  #   : node_name #HEXCOLOR
+  specified_colors <- c(
+    "#FF0000", "#0000FF", "#998000", "#008000", "#800080", "#FFC0CB",
+    "#000000", "#ADD8E6", "#FF4500", "#A52A2A", "#8B4513", "#FF8C00",
+    "#32CD32", "#4682B4", "#9400D3", "#FFD700", "#C0C0C0", "#DC143C",
+    "#1E90FF", "#8B4513", "#FF8C00", "#32CD32", "#4682B4", "#9400D3",
+    "#FFD700", "#C0C0C0", "#DC143C", "#1E90FF"
+  )
+  nd$carac <- as.character(nd$carac)
+  unique_groups <- unique(nd$carac)
+  group_colors <- setNames(rep(specified_colors, length.out = length(unique_groups)), unique_groups)
+  nd$sankey_color <- unname(group_colors[as.character(nd$carac)])
+  link_text <- if (nrow(ed)) paste0(ed$Leader, " [", format(round(ed$WCD, 3), trim = TRUE, scientific = FALSE), "] ", ed$follower, " #000000") else character(0)
+  color_text <- paste0(": ", nd$name, " ", nd$sankey_color)
+  code <- paste(c(link_text, color_text), collapse = "\n")
+
+  list(nodes = nd, edges = ed, code = code, edge_source = chd$edge_source)
+}
+
+plot_flca_sankey_static <- function(sdat) {
+  nd <- as.data.frame(sdat$nodes, stringsAsFactors = FALSE)
+  ed <- as.data.frame(sdat$edges, stringsAsFactors = FALSE)
+  if (!nrow(nd)) {
+    plot.new(); text(0.5, 0.5, "No selected nodes", cex = 1.2, font = 2)
+    return(invisible(NULL))
+  }
+
+  nd$name <- as.character(nd$name)
+  nd$value <- suppressWarnings(as.numeric(nd$value)); nd$value[!is.finite(nd$value)] <- 0
+  nd$carac <- suppressWarnings(as.integer(nd$carac)); nd$carac[!is.finite(nd$carac)] <- 1L
+  nd$lab <- sprintf("%s (%s; C%s)", nd$name, format(nd$value, trim = TRUE), nd$carac)
+  nd$y <- seq_len(nrow(nd))
+  ymap <- setNames(nd$y, nd$name)
+
+  if (!nrow(ed)) {
+    ed <- data.frame(Leader = character(0), follower = character(0), WCD = numeric(0), stringsAsFactors = FALSE)
+  }
+  ed$Leader <- as.character(ed$Leader)
+  ed$follower <- as.character(ed$follower)
+  ed$WCD <- suppressWarnings(as.numeric(ed$WCD)); ed$WCD[!is.finite(ed$WCD)] <- 0
+  ed <- ed[ed$WCD > 0 & ed$Leader %in% nd$name & ed$follower %in% nd$name, , drop = FALSE]
+  if (nrow(ed)) {
+    ed <- ed[order(match(ed$Leader, nd$name), match(ed$follower, nd$name), -ed$WCD), , drop = FALSE]
+    ed$y1 <- ymap[ed$Leader]
+    ed$y2 <- ymap[ed$follower]
+  }
+
+  clusters <- sort(unique(nd$carac))
+  pal <- grDevices::hcl.colors(max(3, length(clusters)), "Dark 3")
+  names(pal) <- as.character(clusters)
+  node_col <- unname(pal[as.character(nd$carac)])
+  col_map <- setNames(node_col, nd$name)
+
+  oldpar <- par(no.readonly = TRUE); on.exit(par(oldpar), add = TRUE)
+  par(mar = c(4.5, 12, 4, 12), xpd = NA, family = "sans")
+  plot(NA, xlim = c(0, 1), ylim = c(nrow(nd) + 1.2, 0), axes = FALSE, xlab = "", ylab = "",
+       main = "Sankey diagram: original Top-20 nodes on both sides")
+
+  # Left and right node blocks: all selected nodes are shown on both sides so
+  # the Sankey has exactly the same node elements as SSplot, Kano, network, and chord.
+  rect_left <- c(0.10, 0.16); rect_right <- c(0.84, 0.90)
+  block_h <- 0.36
+  for (i in seq_len(nrow(nd))) {
+    graphics::rect(rect_left[1], nd$y[i] - block_h, rect_left[2], nd$y[i] + block_h,
+                   col = node_col[i], border = "grey30")
+    graphics::rect(rect_right[1], nd$y[i] - block_h, rect_right[2], nd$y[i] + block_h,
+                   col = node_col[i], border = "grey30")
+    graphics::text(rect_left[1] - 0.015, nd$y[i], nd$lab[i], adj = c(1, 0.5), cex = 0.78, font = 2)
+    graphics::text(rect_right[2] + 0.015, nd$y[i], nd$lab[i], adj = c(0, 0.5), cex = 0.78, font = 2)
+  }
+  graphics::text(mean(rect_left), 0.20, "term1 / Leader", cex = 1.05, font = 2)
+  graphics::text(mean(rect_right), 0.20, "term2 / follower", cex = 1.05, font = 2)
+
+  # Draw ribbon-like flows as filled polygons.  Width is proportional to WCD,
+  # and color follows the leader cluster.
+  if (nrow(ed)) {
+    max_w <- max(ed$WCD, na.rm = TRUE); if (!is.finite(max_w) || max_w <= 0) max_w <- 1
+    for (i in seq_len(nrow(ed))) {
+      x <- seq(rect_left[2] + 0.02, rect_right[1] - 0.02, length.out = 80)
+      t <- seq(0, 1, length.out = 80)
+      y_mid <- (1 - t) * ed$y1[i] + t * ed$y2[i]
+      # smooth cubic easing for a Sankey-like curve
+      ease <- 3 * t^2 - 2 * t^3
+      y_mid <- (1 - ease) * ed$y1[i] + ease * ed$y2[i]
+      half_w <- 0.035 + 0.16 * (ed$WCD[i] / max_w)
+      graphics::polygon(c(x, rev(x)), c(y_mid - half_w, rev(y_mid + half_w)),
+                        col = grDevices::adjustcolor(col_map[ed$Leader[i]] %||% "steelblue", alpha.f = 0.42),
+                        border = NA)
+      graphics::lines(x, y_mid, col = grDevices::adjustcolor("grey25", alpha.f = 0.35), lwd = 0.7)
+      graphics::text(0.50, mean(c(ed$y1[i], ed$y2[i])), labels = format(round(ed$WCD[i], 2), trim = TRUE),
+                     cex = 0.62, col = "grey20")
+    }
+  } else {
+    graphics::text(0.50, 0.75, "No links among the selected Top-20 nodes; blocks are still shown for consistency.", cex = 0.95, font = 2)
+  }
+
+  graphics::mtext("All visible node blocks are the identical selected Top-20 set on both sides; links are the exact final edge table used by chord and SankeyMATIC.", side = 1, line = 1.2, cex = 0.85)
+  graphics::mtext(paste0("Edge source: ", sdat$edge_source), side = 1, line = 2.2, cex = 0.78)
+  invisible(NULL)
+}
+
+# ---- Chord diagram for FLCA Process -----------------------------------------
+# V40: The chord diagram is no longer built from an edge-only matrix with tiny
+# invisible nodes.  It is built from the same selected Top-20 node table and the
+# same filtered Data-tab edge list used by the Sankey and network plots.  Sector
+# widths are based on node value/incident weight, so high-value leaders such as
+# Germany, Mexico, and the United States remain visible even when some followers
+# have few links inside the Top-20 set.
+make_flca_chord_data <- function(xres, target_n = 20) {
+  shiny::req(xres)
+  bun <- make_flca_process_top_bundle(xres, target_n = target_n)
+  nd <- as.data.frame(bun$nodes[, c("name", "carac", "value", "value2"), drop = FALSE], stringsAsFactors = FALSE)
+  if (!nrow(nd)) stop("No final Top-N nodes are available for the chord diagram.", call. = FALSE)
+  nd$name <- as.character(nd$name)
+  nd$carac <- suppressWarnings(as.integer(nd$carac)); nd$carac[!is.finite(nd$carac)] <- 1L
+  nd$value <- suppressWarnings(as.numeric(nd$value)); nd$value[!is.finite(nd$value)] <- 0
+  nd$value2 <- suppressWarnings(as.numeric(nd$value2)); nd$value2[!is.finite(nd$value2)] <- 0
+  top_names <- nd$name
+
+  ed_top <- as.data.frame(bun$edges_plot, stringsAsFactors = FALSE)
+  if (!nrow(ed_top)) ed_top <- data.frame(Leader = character(0), follower = character(0), WCD = numeric(0), stringsAsFactors = FALSE)
+  ed_top$Leader <- as.character(ed_top$Leader)
+  ed_top$follower <- as.character(ed_top$follower)
+  ed_top$WCD <- suppressWarnings(as.numeric(ed_top$WCD)); ed_top$WCD[!is.finite(ed_top$WCD)] <- 0
+  ed_top <- ed_top[ed_top$WCD > 0 & ed_top$Leader %in% top_names & ed_top$follower %in% top_names, , drop = FALSE]
+  if (nrow(ed_top)) {
+    ed_top <- aggregate(WCD ~ Leader + follower, data = ed_top, FUN = function(x) sum(x, na.rm = TRUE))
+    ed_top <- ed_top[order(match(ed_top$Leader, top_names), match(ed_top$follower, top_names), -ed_top$WCD), , drop = FALSE]
+  }
+
+  # matrix kept for export/debug; custom static plot below is the display source.
+  mat_real <- matrix(0, nrow = length(top_names), ncol = length(top_names), dimnames = list(top_names, top_names))
+  if (nrow(ed_top)) for (i in seq_len(nrow(ed_top))) mat_real[ed_top$Leader[i], ed_top$follower[i]] <- mat_real[ed_top$Leader[i], ed_top$follower[i]] + ed_top$WCD[i]
+
+  incident <- rowSums(mat_real, na.rm = TRUE) + colSums(mat_real, na.rm = TRUE)
+  nd$incident_wcd <- as.numeric(incident[nd$name]); nd$incident_wcd[!is.finite(nd$incident_wcd)] <- 0
+  nd$sector_size <- pmax(nd$value, nd$incident_wcd, 1)
+
+  clusters <- sort(unique(nd$carac))
+  pal <- grDevices::hcl.colors(max(3, length(clusters)), "Dark 3")
+  names(pal) <- as.character(clusters)
+  group_colors <- unname(pal[as.character(nd$carac)])
+  list(
     nodes = nd,
-    title_txt = "Kano plot under SSplot: value vs value2 by FLCA cluster",
-    label_size = label_size
-  ) + ggplot2::labs(x = "value2", y = "value")
+    edges = ed_top,
+    matrix_real = mat_real,
+    group_colors = group_colors,
+    edge_source = bun$edge_source,
+    note = sprintf("Chord uses exactly the same %d selected Top-20 nodes as SSplot, Kano, network, and Sankey; max 4 nodes per cluster; edge source: %s. Sector size is based on node value and incident WCD, not edge-only visibility.", nrow(nd), bun$edge_source)
+  )
+}
+
+plot_flca_chord_static <- function(chd) {
+  nd <- as.data.frame(chd$nodes, stringsAsFactors = FALSE)
+  ed <- as.data.frame(chd$edges, stringsAsFactors = FALSE)
+  if (!requireNamespace("circlize", quietly = TRUE)) {
+    graphics::plot.new()
+    graphics::text(0.5, 0.60, "Install circlize for the chord diagram:", cex = 1.15, font = 2)
+    graphics::text(0.5, 0.50, "install.packages('circlize')", cex = 1.05)
+    graphics::text(0.5, 0.38, chd$note, cex = 0.85)
+    return(invisible(NULL))
+  }
+  if (!nrow(nd)) {
+    graphics::plot.new(); graphics::text(0.5, 0.5, "No selected nodes", cex = 1.2, font = 2)
+    return(invisible(NULL))
+  }
+  nd$name <- as.character(nd$name)
+  nd$sector_size <- suppressWarnings(as.numeric(nd$sector_size)); nd$sector_size[!is.finite(nd$sector_size) | nd$sector_size <= 0] <- 1
+  ed$Leader <- as.character(ed$Leader); ed$follower <- as.character(ed$follower)
+  ed$WCD <- suppressWarnings(as.numeric(ed$WCD)); ed$WCD[!is.finite(ed$WCD)] <- 0
+  ed <- ed[ed$WCD > 0 & ed$Leader %in% nd$name & ed$follower %in% nd$name, , drop = FALSE]
+
+  circlize::circos.clear()
+  on.exit(circlize::circos.clear(), add = TRUE)
+  nsec <- nrow(nd)
+  gap_after <- rep(ifelse(nsec <= 20, 3.5, 2), nsec)
+  if (nsec > 1) gap_after[nsec] <- 10
+  circlize::circos.par(start.degree = 90, gap.after = gap_after, track.margin = c(0.01, 0.01), points.overflow.warning = FALSE)
+  xlim <- cbind(rep(0, nsec), nd$sector_size)
+  rownames(xlim) <- nd$name
+  circlize::circos.initialize(factors = nd$name, xlim = xlim)
+  grid_col <- setNames(chd$group_colors, nd$name)
+
+  short_label <- function(z) {
+    z <- as.character(z)
+    ifelse(nchar(z) > 18, paste0(substr(z, 1, 16), "…"), z)
+  }
+
+  circlize::circos.trackPlotRegion(
+    ylim = c(0, 1), track.height = 0.13, bg.border = NA,
+    panel.fun = function(x, y) {
+      nm <- circlize::get.cell.meta.data("sector.index")
+      xl <- circlize::get.cell.meta.data("xlim")
+      circlize::circos.rect(xl[1], 0, xl[2], 1, col = grid_col[nm], border = "white")
+      circlize::circos.text(mean(xl), 1.35, short_label(nm), facing = "clockwise", niceFacing = TRUE,
+                            adj = c(0, 0.5), cex = ifelse(nsec <= 20, 0.58, 0.45), font = 2)
+    }
+  )
+
+  if (nrow(ed)) {
+    out_pos <- setNames(rep(0, nrow(nd)), nd$name)
+    in_pos <- setNames(rep(0, nrow(nd)), nd$name)
+    # allocate source/target intervals using WCD, clipped to each sector size
+    for (i in seq_len(nrow(ed))) {
+      a <- ed$Leader[i]; b <- ed$follower[i]; w <- max(0.05, ed$WCD[i])
+      sa <- nd$sector_size[match(a, nd$name)]; sb <- nd$sector_size[match(b, nd$name)]
+      xa1 <- out_pos[a]; xa2 <- min(sa, xa1 + w); out_pos[a] <- xa2
+      xb1 <- in_pos[b]; xb2 <- min(sb, xb1 + w); in_pos[b] <- xb2
+      if (xa2 <= xa1) { xa1 <- max(0, sa - 0.05); xa2 <- sa }
+      if (xb2 <= xb1) { xb1 <- max(0, sb - 0.05); xb2 <- sb }
+      circlize::circos.link(a, c(xa1, xa2), b, c(xb1, xb2),
+                            col = grDevices::adjustcolor(grid_col[a], alpha.f = 0.38), border = NA)
+    }
+  }
+  graphics::title("Chord diagram: same Top-20 nodes as SSplot/Sankey/network", cex.main = 1.05)
+  invisible(NULL)
 }
 
 ui <- fluidPage(
-  titlePanel("FLCA / Community Comparison Demo — V30 FIFA online group summary + NBA demos"),
-  tags$head(tags$style(HTML("
+  titlePanel("FLCA / Community Comparison Demo — V51 taller Golden Boot slopegraph"),
+  tags$head(
+    tags$script(src = "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"),
+    tags$script(HTML("
+      function fifaDownloadElementPNG(id, filename) {
+        var outer = document.getElementById(id);
+        if (!outer) { alert('Nothing to download yet. Please draw the plot first.'); return; }
+        if (typeof html2canvas === 'undefined') { alert('html2canvas not loaded. Please check internet connection or reload the app.'); return; }
+
+        // Capture the real content box, not the horizontal-scroll wrapper.
+        var el = document.getElementById(id + '_inner') || outer;
+        var oldOuterOverflow = outer.style.overflow;
+        var oldOuterWidth = outer.style.width;
+        var oldElDisplay = el.style.display;
+        var oldElTransform = el.style.transform;
+
+        outer.style.overflow = 'visible';
+        outer.style.width = 'max-content';
+        el.style.display = 'inline-block';
+        el.style.transform = 'none';
+        el.scrollIntoView(false);
+
+        setTimeout(function() {
+          var rect = el.getBoundingClientRect();
+          var captureWidth = Math.ceil(Math.max(el.scrollWidth, el.offsetWidth, rect.width));
+          var captureHeight = Math.ceil(Math.max(el.scrollHeight, el.offsetHeight, rect.height));
+
+          html2canvas(el, {
+            backgroundColor: '#ffffff',
+            scale: 5,
+            useCORS: true,
+            logging: false,
+            scrollX: -window.scrollX,
+            scrollY: -window.scrollY,
+            windowWidth: Math.max(document.documentElement.clientWidth, captureWidth + 40),
+            windowHeight: Math.max(document.documentElement.clientHeight, captureHeight + 40),
+            width: captureWidth,
+            height: captureHeight,
+            x: 0,
+            y: 0,
+            onclone: function(doc) {
+              doc.body.style.overflow = 'visible';
+              var clonedOuter = doc.getElementById(id);
+              var clonedEl = doc.getElementById(id + '_inner') || clonedOuter;
+              if (clonedOuter) {
+                clonedOuter.style.overflow = 'visible';
+                clonedOuter.style.width = 'max-content';
+              }
+              if (clonedEl) {
+                clonedEl.style.display = 'inline-block';
+                clonedEl.style.transform = 'none';
+                clonedEl.style.position = 'static';
+              }
+            }
+          }).then(function(canvas) {
+            outer.style.overflow = oldOuterOverflow;
+            outer.style.width = oldOuterWidth;
+            el.style.display = oldElDisplay;
+            el.style.transform = oldElTransform;
+
+            var link = document.createElement('a');
+            link.download = filename || 'fifa2026_plot.png';
+            link.href = canvas.toDataURL('image/png');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }).catch(function(err) {
+            outer.style.overflow = oldOuterOverflow;
+            outer.style.width = oldOuterWidth;
+            el.style.display = oldElDisplay;
+            el.style.transform = oldElTransform;
+            alert('PNG capture failed: ' + err);
+          });
+        }, 120);
+      }
+      if (window.Shiny) {
+        Shiny.addCustomMessageHandler('fifaDownloadElementPNG', function(msg) {
+          fifaDownloadElementPNG(msg.id, msg.filename);
+        });
+      }
+    ")),
+    tags$style(HTML("
     /* V20: robust red coloring for only four requested tab labels.
        We use an inline span class in the tab title instead of nth-child CSS,
        because Shiny/Bootstrap wraps tabsets differently across versions. */
@@ -2393,7 +3219,7 @@ ui <- fluidPage(
       actionButton("run_nba2025_2026", "Run NBA 2025-2026 demo from nba.xlsx", class = "btn-success"),
       br(), br(),
       actionButton("run", "Run analysis", class = "btn-primary"),
-      p("Default input is demo CSV. V30 adds direct demo buttons: FIFA bundled XLSX, REAL FIFA online Wikipedia update, and NBA 2025-2026 from nba.xlsx."),
+      p("Default input is demo CSV. V43 restores the red-line FIFA Golden Boot slopegraph and keeps original Top-20 nodes on both term1/Leader and term2/follower sides of the Sankey plot."),
       hr(),
       h4("Download demo data"),
       downloadButton("download_demo_dataset1", "Download demo CSV: dataset1.csv"),
@@ -2419,10 +3245,19 @@ ui <- fluidPage(
         fifa2026_source_links_ui(),
         downloadButton("download_fifa2026_xlsx", "Download last updated FIFA online XLSX"),
         br(), br(),
+        numericInput("fifa_prediction_seed", "Prediction seed", value = 20260621, min = 1, step = 1),
+        helpText("Changing the seed produces another reproducible prediction path while keeping Table 1 points and the performance prior fixed."),
+        br(),
         h5("FIFA group performance summary at reporting date"),
         helpText("After online update, each Group A-L row uses a clickable Group A-L hyperlink label instead of showing the raw URL. Top 1 appears at the left and the next three teams to the right; points are shown in parentheses."),
         uiOutput("fifa_group_summary_date_sidebar"),
-        DTOutput("fifa_group_summary_sidebar")
+        DTOutput("fifa_group_summary_sidebar"),
+        hr(),
+        h5("The chase for the Golden Boot of FIFA 2026"),
+        helpText("The table and slopegraph are built from scorer lists parsed from Wikipedia footballbox fields (.fhgoal and .fagoal) when those scorer fields are available."),
+        uiOutput("fifa_golden_boot_date_sidebar"),
+        DTOutput("fifa_golden_boot_sidebar"),
+        uiOutput("fifa_golden_boot_plot_note_sidebar")
       ),
       conditionalPanel("input.input_mode == 'demo_nba2025_2026'",
         h5("NBA 2025-2026 bundled XLSX demo"),
@@ -2461,10 +3296,72 @@ ui <- fluidPage(
           uiOutput("fifa_group_summary_date_main"),
           DTOutput("fifa_group_summary_main"),
           hr(),
+          h4("FIFA 2026 prediction path by stage"),
+          p("Generated when clicking Update FIFA 2026 online and run. Prediction = 0.7 × Table 1 current points + 0.3 × mixed performance prior; the seed controls reproducible randomization."),
+          uiOutput("fifa_prediction_seed_note"),
+          actionButton("run_fifa_prediction_plot", "Run FIFA 2026 prediction plot", class = "btn-primary"),
+          actionButton("download_fifa_prediction_path_png_client", "Download prediction path PNG", icon = icon("download")),
+          actionButton("download_fifa_prediction_ssq_png_client", "Download SS/Q PNG", icon = icon("download")),
+          br(), br(),
+          DTOutput("fifa_prediction_metrics_table"),
+          DTOutput("fifa_prediction_path_table"),
+          tags$div(style="overflow-x:auto; width:100%;", tags$div(id = "fifa_prediction_path_capture", style="display:inline-block; width:max-content; max-width:none; overflow:visible;", uiOutput("fifa_prediction_path_html"))),
+          tags$div(id = "fifa_prediction_ssq_capture", uiOutput("fifa_prediction_ssq_html")),
+          hr(),
+          h4("FIFA 2026 Golden Boot chase"),
+          p("For the online FIFA update, scorer lists are parsed from Wikipedia footballbox scorer fields when available. The table reports goal totals; the slopegraph tracks cumulative goals by parsed match order."),
+          uiOutput("fifa_golden_boot_date_main"),
+          DTOutput("fifa_golden_boot_main"),
+          actionButton("run_fifa_golden_boot_plot", "Draw Golden Boot slopegraph", class = "btn-warning"),
+          actionButton("download_fifa_golden_boot_png_client", "Download Golden Boot PNG", icon = icon("download")),
+          br(), br(),
+          tags$div(style="overflow-x:auto; width:100%;", tags$div(id = "fifa_golden_boot_capture", uiOutput("fifa_golden_boot_slope_html"))),
+          uiOutput("fifa_golden_boot_plot_note_main"),
+          hr(),
           DTOutput("tbl_nodes"), br(), DTOutput("tbl_edges")),
         tabPanel("Full Network", br(), fluidRow(column(5, selectInput("full_method", "Clustering algorithm", choices = community_methods, selected = "louvain")), column(4, sliderInput("full_top_n", "Show top N nodes", min = 5, max = 100, value = 30, step = 1)), column(3, checkboxInput("full_use_all", "Show all nodes", value = FALSE))), visNetworkOutput("plot_full", height = "720px")),
         tabPanel("FLCA Reduced", br(), fluidRow(column(4, checkboxInput("flca_major_sampling", "Use FLCA-MA major sampling", value = TRUE)), column(4, sliderInput("flca_top_clusters", "Top clusters", min = 1, max = 20, value = 6, step = 1)), column(4, sliderInput("flca_n_per_cluster", "At least N nodes per top cluster", min = 1, max = 20, value = 3, step = 1))), visNetworkOutput("plot_flca", height = "720px"), br(), h4("Reduced edges"), DTOutput("tbl_reduced")),
-        tabPanel(title = tags$span(class = "tab-red", "FLCA Process"), br(), h3("FLCA 6-step visual process"), h4("Step 1. Input nodes and weighted edges"), fluidRow(column(6, DTOutput("flca_step1_nodes")), column(6, DTOutput("flca_step1_edges"))), h4("Step 2. Full weighted graph"), visNetworkOutput("flca_step2_full_graph", height = "560px"), h4("Step 3. FLCA reduced one-link graph"), visNetworkOutput("flca_step3_reduced_graph", height = "560px"), h4("Step 4. Leader/follower cluster summary"), DTOutput("flca_step4_cluster_summary"), h4("Step 5b. SankeyMATIC code"), verbatimTextOutput("flca_step5_sankeymatic_code"), h4("Step 6. Real SSplot cluster summary using renderSSplot(82).R"), plotOutput("flca_step6_ssplot", height = "920px"), br(), h4("Step 6b. Kano plot under SSplot: value on y-axis and value2 on x-axis"), plotOutput("flca_step6_kano", height = "760px")),
+        tabPanel(title = tags$span(class = "tab-red", "FLCA Process"), br(),
+          h3("FLCA 6-step visual process"),
+          h4("Step 1. Input nodes and weighted edges"),
+          fluidRow(column(6, DTOutput("flca_step1_nodes")), column(6, DTOutput("flca_step1_edges"))),
+          h4("Step 2. Full weighted graph"),
+          visNetworkOutput("flca_step2_full_graph", height = "560px"),
+          downloadButton("download_flca_step2_png", "Download Step 2 network PNG"),
+          br(), br(),
+          h4("Step 3. FLCA reduced one-link graph"),
+          visNetworkOutput("flca_step3_reduced_graph", height = "560px"),
+          downloadButton("download_flca_step3_png", "Download Step 3 reduced network PNG"),
+          br(), br(),
+          h4("Step 4. Leader/follower cluster summary"),
+          DTOutput("flca_step4_cluster_summary"),
+          h4("Step 5b. Sankey plot and SankeyMATIC code: same final Top-20 nodes"),
+          p("The Sankey plot keeps the original Top-20 node set on both term1/Leader and term2/follower sides; links and SankeyMATIC code use the exact final edge table."),
+          plotOutput("flca_step5_sankey_plot", height = "760px"),
+          downloadButton("download_flca_step5_sankey_png", "Download Step 5b Sankey PNG"),
+          h5("SankeyMATIC code"),
+          verbatimTextOutput("flca_step5_sankeymatic_code"),
+          h4("Step 6. Real SSplot cluster summary using renderSSplot(82).R"),
+          plotOutput("flca_step6_ssplot", height = "920px"),
+          downloadButton("download_flca_step6_ssplot_png", "Download Step 6 SSplot PNG"),
+          br(), br(),
+          h4("Step 6b. Wide Kano plot under SSplot: value on y-axis and value2 on x-axis"),
+          plotOutput("flca_step6_kano", height = "920px", width = "100%"),
+          downloadButton("download_flca_step6_kano_png", "Download Step 6b Kano PNG"),
+          br(),
+          h4("Step 6c. Interactive chord dashboard: final Top-20 FLCA nodes and edges"),
+          p("The chord diagram uses the same final Top-20 nodes and the same filtered Data-tab edges as the SSplot, Kano, network, and Sankey plots. Sector size is based on node value and incident WCD so high-value leaders remain visible."),
+          verbatimTextOutput("flca_step6c_chord_note"),
+          uiOutput("flca_step6c_chord_ui"),
+          h4("Step 6c chord nodes: same final Top-N rows as SSplot"),
+          DTOutput("flca_step6c_chord_nodes"),
+          h4("Step 6c chord edges"),
+          DTOutput("flca_step6c_chord_edges"),
+          br(),
+          downloadButton("download_flca_step6c_chord_png", "Download Step 6c chord PNG"),
+          downloadButton("download_flca_step6c_chord_edges", "Download Step 6c chord edges CSV"),
+          downloadButton("download_flca_process_all_png_zip", "Download all FLCA Process PNGs (.zip)")
+        ),
         tabPanel("Memberships", br(), DTOutput("tbl_memberships"), br(), downloadButton("download_memberships", "Download memberships CSV")),
         tabPanel("Quality", br(), h4("FLCA maturity vs influence annotation"), verbatimTextOutput("flca_mode_annotation"), DTOutput("tbl_quality"), br(), downloadButton("download_quality", "Download quality CSV")),
         tabPanel("Ranking", br(), DTOutput("tbl_ranking"), br(), downloadButton("download_ranking", "Download ranking CSV")),
@@ -2478,15 +3375,487 @@ ui <- fluidPage(
           DTOutput("tbl_visual_quality_kano"),
           br(), downloadButton("download_visual_quality_kano", "Download visual-quality Kano CSV")),
         tabPanel(title = tags$span(class = "tab-red", "Parameters"), br(), h3("Reproducible parameter settings"), downloadButton("download_parameters", "Download parameter settings CSV"), br(), br(), DTOutput("tbl_parameters"), h4("How to report these settings in Methods"), verbatimTextOutput("parameter_methods_text")),
-        tabPanel(title = tags$span(class = "tab-red", "ReadMe"), br(), h3("ReadMe: FLCA and community clustering comparison app"), p("V31 preserves the original-style sidebar and colors only four main tabs red: FLCA Process, Visual Quality, Parameters, and ReadMe. Demo CSV reads dataset1.csv; FIFA 2026 bundled demo reads fifa_2026_updated_nodes_edges.xlsx; FIFA online update really fetches Wikipedia Group A–L pages at run time, rebuilds that workbook, and runs analysis; NBA 2025-2026 demo reads nba.xlsx. Excel upload reads nodes/edges workbooks; CSV coword upload converts document-term data to nodes and weighted edges. FLCA Process Step 6 shows the real SSplot and Step 6b shows a node-level Kano plot with value on the y-axis and value2 on the x-axis. The Visual Quality tab separately shows algorithm quality with modularity Q on x and mean silhouette SS on y.")),
+        tabPanel(title = tags$span(class = "tab-red", "ReadMe"), br(), h3("ReadMe: FLCA and community clustering comparison app"), p("V34 preserves the original-style sidebar and colors only four main tabs red: FLCA Process, Visual Quality, Parameters, and ReadMe. Demo CSV reads dataset1.csv; FIFA 2026 bundled demo reads fifa_2026_updated_nodes_edges.xlsx; FIFA online update really fetches Wikipedia Group A–L pages at run time, rebuilds that workbook, parses Golden Boot scorer fields when available, and runs analysis; NBA 2025-2026 demo reads nba.xlsx. Excel upload reads nodes/edges workbooks; CSV coword upload converts document-term data to nodes and weighted edges. FLCA Process Step 6 shows the real SSplot and Step 6b shows a wider node-level Kano plot with value on the y-axis and value2 on the x-axis. The Visual Quality tab separately shows algorithm quality with modularity Q on x and mean silhouette SS on y.")),
         tabPanel("Deploy Notes", br(), h4("shinyapps.io deployment"), pre("install.packages(c('shiny','DT','igraph','visNetwork','RColorBrewer','ggplot2','ggrepel','dplyr','tibble','readxl','openxlsx','httr2','rvest','xml2','stringr','tidyr','purrr'), type='binary')\nrsconnect::deployApp(appDir='F:/taaforgae/zWoSPubmed/flcacompare', appName='flcacompare', forceUpdate=TRUE)"))
       )
     )
   )
 )
 
+
+# ---- FIFA 2026 prediction path: Table 1 + mixed prior + seed -----------------
+make_fifa_prediction_metrics <- function() {
+  tibble::tribble(
+    ~stage, ~matches, ~SS, ~Q,
+    "Stage 48", 48, 0.6200, 0.9600,
+    "Group stage", 72, 0.3846, 0.8988,
+    "Round of 32", 88, 0.3441, 0.7413,
+    "Round of 16", 96, 0.3346, 0.6857,
+    "Quarterfinals", 100, 0.3323, 0.6682,
+    "Semifinals", 102, 0.3255, 0.6409,
+    "Final", 103, 0.3255, 0.6365,
+    "Third-place match", 104, 0.3255, 0.6330
+  )
+}
+
+make_fifa_prediction_prior <- function() {
+  tibble::tribble(
+    ~team, ~elo, ~fifa_rank_score, ~wc_history,
+    "Brazil",100,98,100, "Argentina",99,100,98, "France",98,99,95,
+    "Germany",94,90,96, "England",93,94,88, "Spain",92,95,90,
+    "Portugal",91,93,84, "Netherlands",90,92,86, "Belgium",88,91,78,
+    "Uruguay",87,86,88, "Croatia",86,85,84, "Switzerland",82,84,70,
+    "Mexico",81,82,72, "United States",80,81,65, "Morocco",79,83,75,
+    "Japan",78,80,66, "Colombia",77,79,68, "Senegal",76,78,65,
+    "South Korea",75,77,66, "Austria",74,76,58, "Sweden",73,74,68,
+    "Australia",72,73,55, "Norway",71,75,50, "Canada",70,72,48,
+    "Ghana",69,70,60, "Ivory Coast",68,69,55, "Czech Republic",67,68,58,
+    "Paraguay",66,67,62, "Scotland",65,66,52, "Turkey",64,65,56,
+    "Ecuador",63,64,54, "Saudi Arabia",62,63,50, "Egypt",61,62,52,
+    "Iran",60,61,50, "Tunisia",59,60,48, "South Africa",58,59,46,
+    "Qatar",57,58,42, "Algeria",56,57,46, "Panama",55,56,40,
+    "Bosnia and Herzegovina",54,55,42, "New Zealand",53,54,38,
+    "Haiti",52,53,36, "Iraq",51,52,35, "Jordan",50,51,34,
+    "Uzbekistan",49,50,34, "DR Congo",48,49,36,
+    "Cape Verde",47,48,32, "Curacao",46,47,30, "Curaçao",46,47,30
+  ) |>
+    dplyr::mutate(
+      Elo_norm = as.numeric(scale(elo)),
+      FIFA_norm = as.numeric(scale(fifa_rank_score)),
+      History_norm = as.numeric(scale(wc_history)),
+      mixed_prior = 0.5 * Elo_norm + 0.3 * FIFA_norm + 0.2 * History_norm
+    )
+}
+
+make_fifa_prediction_from_nodes <- function(nodes, seed_value = 20260621) {
+  set.seed(as.integer(seed_value))
+  nd <- safe_df(nodes)
+  nms0 <- tolower(gsub("[^[:alnum:]]", "", names(nd)))
+  name_col <- names(nd)[which(nms0 %in% c("name", "team", "node", "term", "label", "id"))[1] %||% 1]
+  pts_col <- names(nd)[which(nms0 %in% c("value", "points", "score", "pts"))[1] %||% NA_integer_]
+  cl_col <- names(nd)[which(nms0 %in% c("cluster", "carac", "group", "membership"))[1] %||% NA_integer_]
+  nd$team <- trimws(as_utf8(nd[[name_col]]))
+  nd$points <- if (is.na(pts_col)) 0 else suppressWarnings(as.numeric(nd[[pts_col]]))
+  nd$points[!is.finite(nd$points)] <- 0
+  if (is.na(cl_col)) {
+    nd$group <- NA_character_
+  } else {
+    raw_cl <- as.character(nd[[cl_col]])
+    raw_num <- suppressWarnings(as.integer(gsub("[^0-9-]", "", raw_cl)))
+    letter_cl <- match(toupper(gsub(".*([A-L]).*", "\\1", raw_cl)), LETTERS[1:12])
+    cl_num <- ifelse(is.na(raw_num), letter_cl, raw_num)
+    nd$group <- LETTERS[pmax(1, pmin(12, as.integer(cl_num)))]
+  }
+  df <- nd |>
+    dplyr::filter(nzchar(team), !is.na(group)) |>
+    dplyr::select(group, team, points) |>
+    dplyr::distinct(group, team, .keep_all = TRUE) |>
+    dplyr::left_join(make_fifa_prediction_prior(), by = "team") |>
+    dplyr::mutate(
+      mixed_prior = ifelse(is.na(mixed_prior), 0, mixed_prior),
+      points_norm = if (stats::sd(points, na.rm = TRUE) > 0) as.numeric(scale(points)) else 0,
+      prediction_score = 0.7 * points_norm + 0.3 * mixed_prior + stats::rnorm(dplyr::n(), 0, 0.10)
+    )
+  if (nrow(df) < 32) stop("FIFA prediction needs at least 32 valid teams in nodes.", call. = FALSE)
+
+  ranked <- df |>
+    dplyr::group_by(group) |>
+    dplyr::arrange(dplyr::desc(points), dplyr::desc(prediction_score), .by_group = TRUE) |>
+    dplyr::mutate(group_rank = dplyr::row_number()) |>
+    dplyr::ungroup()
+  qualified32 <- dplyr::bind_rows(
+    ranked |> dplyr::filter(group_rank <= 2),
+    ranked |> dplyr::filter(group_rank == 3) |>
+      dplyr::arrange(dplyr::desc(points), dplyr::desc(prediction_score)) |>
+      dplyr::slice(1:8)
+  ) |>
+    dplyr::arrange(dplyr::desc(prediction_score))
+
+  predict_one <- function(a, b) {
+    sa <- df$prediction_score[match(a, df$team)]
+    sb <- df$prediction_score[match(b, df$team)]
+    p_a <- exp(sa) / (exp(sa) + exp(sb))
+    winner <- ifelse(stats::runif(1) < p_a, a, b)
+    loser <- ifelse(winner == a, b, a)
+    tibble::tibble(team1 = a, team2 = b, winner = winner, loser = loser)
+  }
+  make_pairs <- function(x) {
+    x <- as.character(x)
+    high <- x[1:(length(x) / 2)]
+    low <- rev(x[(length(x) / 2 + 1):length(x)])
+    cbind(high, low)
+  }
+  sim_round <- function(team_vec, round_name) {
+    pairs <- make_pairs(team_vec)
+    dplyr::bind_rows(lapply(seq_len(nrow(pairs)), function(i) predict_one(pairs[i, 1], pairs[i, 2]))) |>
+      dplyr::mutate(round = round_name, game = dplyr::row_number())
+  }
+  r32 <- sim_round(qualified32$team, "Round of 32")
+  r16 <- sim_round(r32$winner, "Round of 16")
+  qf <- sim_round(r16$winner, "Quarterfinals")
+  sf <- sim_round(qf$winner, "Semifinals")
+  final <- sim_round(sf$winner, "Final")
+  third <- sim_round(sf$loser, "Third-place match")
+  path <- dplyr::bind_rows(r32, r16, qf, sf, final, third) |>
+    dplyr::select(round, game, team1, team2, winner, loser)
+  list(
+    seed = as.integer(seed_value),
+    path = path,
+    qualified32 = qualified32,
+    scores = df,
+    metrics = make_fifa_prediction_metrics(),
+    champion = final$winner[1], runner_up = final$loser[1],
+    third = third$winner[1], fourth = third$loser[1]
+  )
+}
+
+
+# Windows-safe base-R renderer for FIFA prediction path.
+# It avoids ggplot/grid text grobs, which can trigger:
+# "不是所有的 is.character(txt) 都是 TRUE" on some Windows Shiny devices.
+draw_fifa_prediction_path_base <- function(fp, label_cex = 0.72) {
+  round_levels <- c("Round of 32", "Round of 16", "Quarterfinals", "Semifinals", "Final", "Third-place match")
+  path <- as.data.frame(fp$path, stringsAsFactors = FALSE)
+  if (nrow(path) == 0) {
+    plot.new(); text(0.5, 0.5, "No prediction path available")
+    return(invisible(NULL))
+  }
+  path$round  <- enc2utf8(as.character(path$round))
+  path$team1  <- enc2utf8(as.character(path$team1))
+  path$team2  <- enc2utf8(as.character(path$team2))
+  path$winner <- enc2utf8(as.character(path$winner))
+  path$game   <- suppressWarnings(as.numeric(path$game))
+  path$stage_pos <- match(path$round, round_levels)
+  path$y_pos <- ifelse(path$round == "Round of 32", path$game * 2,
+                ifelse(path$round == "Round of 16", path$game * 4 - 1,
+                ifelse(path$round == "Quarterfinals", path$game * 8 - 3,
+                ifelse(path$round == "Semifinals", path$game * 16 - 7,
+                ifelse(path$round == "Final", 16,
+                ifelse(path$round == "Third-place match", 26, path$game * 2))))))
+  path$label <- enc2utf8(as.character(paste0(path$team1, " vs ", path$team2, "\nW: ", path$winner)))
+
+  oldpar <- par(no.readonly = TRUE)
+  on.exit(par(oldpar), add = TRUE)
+  par(mar = c(5, 4, 5, 4), xpd = NA, family = "sans")
+
+  plot(NA, NA,
+       xlim = c(0.8, 7.7), ylim = c(35, 0),
+       xaxt = "n", yaxt = "n", xlab = "Stage", ylab = "",
+       main = enc2utf8(as.character(paste0("Predicted FIFA 2026 knockout path, seed = ", fp$seed))))
+  axis(1, at = seq_along(round_levels), labels = round_levels, cex.axis = 0.78, font.axis = 2)
+  grid(nx = NA, ny = NULL, col = "grey88", lty = 1)
+  abline(v = seq_along(round_levels), col = "grey92", lty = 1)
+
+  subtitle <- enc2utf8(as.character(paste0(
+    "Based on the current Table 1 group points at each run + mixed performance prior.  ",
+    "Champion: ", fp$champion,
+    " | Runner-up: ", fp$runner_up,
+    " | Third: ", fp$third,
+    " | Fourth: ", fp$fourth
+  )))
+  mtext(subtitle, side = 3, line = 0.5, cex = 0.72, col = "grey25")
+
+  # Draw simple white label boxes. All labels are forced to character.
+  for (i in seq_len(nrow(path))) {
+    x <- path$stage_pos[i]
+    y <- path$y_pos[i]
+    lab <- as.character(path$label[i])
+    # approximate box dimensions in user coordinates
+    w <- 1.00
+    h <- 1.38
+    rect(x - 0.05, y - h/2, x + w, y + h/2, col = "white", border = "grey65")
+    points(x, y, pch = 19, cex = 0.65)
+    text(x + 0.03, y, labels = lab, adj = c(0, 0.5), cex = label_cex)
+  }
+
+  invisible(NULL)
+}
+
+# Windows-safe base-R renderer for SS/Q decline.
+draw_fifa_prediction_ssq_base <- function(fp) {
+  mt <- as.data.frame(fp$metrics, stringsAsFactors = FALSE)
+  mt$matches <- suppressWarnings(as.numeric(mt$matches))
+  mt$SS <- suppressWarnings(as.numeric(mt$SS))
+  mt$Q <- suppressWarnings(as.numeric(mt$Q))
+  oldpar <- par(no.readonly = TRUE)
+  on.exit(par(oldpar), add = TRUE)
+  par(mar = c(5, 4, 4, 2), family = "sans")
+  yr <- range(c(mt$SS, mt$Q), finite = TRUE)
+  plot(mt$matches, mt$SS, type = "b", pch = 19, lwd = 2,
+       ylim = yr, xlab = "Accumulated matches", ylab = "Value",
+       main = "Predicted SS and Q decline by FIFA 2026 stage")
+  lines(mt$matches, mt$Q, type = "b", pch = 17, lwd = 2, lty = 2)
+  grid(col = "grey88")
+  legend("topright", legend = c("SS", "Q"), pch = c(19, 17), lty = c(1, 2), lwd = 2, bty = "n")
+  text(mt$matches, mt$SS, labels = sprintf("%.4f", mt$SS), pos = 3, cex = 0.72)
+  text(mt$matches, mt$Q, labels = sprintf("%.4f", mt$Q), pos = 1, cex = 0.72)
+  invisible(NULL)
+}
+
+# Backward-compatible names used by older code. These draw directly and return NULL.
+plot_fifa_prediction_path_clear <- function(fp, label_size = 2.05) {
+  draw_fifa_prediction_path_base(fp, label_cex = 0.72)
+}
+plot_fifa_prediction_ssq <- function(fp) {
+  draw_fifa_prediction_ssq_base(fp)
+}
+
+
+# ---- HTML-only FIFA output helpers ------------------------------------------
+# These avoid ggplot/grid/device text rendering, preventing Windows/Shiny
+# errors such as: "不是所有的 is.character(txt) 都是 TRUE".
+save_tag_as_html <- function(tag_obj, file, title = "FIFA 2026 output") {
+  htmltools::save_html(
+    htmltools::tagList(
+      tags$head(
+        tags$title(title),
+        tags$meta(charset = "utf-8"),
+        tags$style("body{font-family:Arial,Helvetica,sans-serif;margin:18px;} .table{border-collapse:collapse;} .table th,.table td{border:1px solid #ddd;padding:6px;} .card{box-shadow:0 1px 3px rgba(0,0,0,.08);}")
+      ),
+      tag_obj
+    ),
+    file = file
+  )
+}
+
+make_fifa_prediction_path_html <- function(fp) {
+  path <- as.data.frame(fp$path, stringsAsFactors = FALSE)
+  if (nrow(path) == 0) {
+    return(tags$div(class = "alert alert-info", "No FIFA prediction path available."))
+  }
+  for (nm in names(path)) path[[nm]] <- enc2utf8(as.character(path[[nm]]))
+  path$game_num <- suppressWarnings(as.numeric(path$game))
+
+  # V47 layout:
+  # - Left: Round of 32.
+  # - Right: Round of 16 + Quarterfinals at the top.
+  # - The highlighted final pathway is moved upward to fill the blank space,
+  #   with Third-place match below Final.
+  # - This makes the exported PNG more compact and closer to square.
+
+  build_round_cards <- function(rn, card_fs = 23, win_fs = 21, pad_px = 14, min_h = 88,
+                                card_border = "2px solid #9a9a9a", team_color = "#111",
+                                winner_color = "#b00020", card_bg = "white") {
+    dd <- path[path$round == rn, , drop = FALSE]
+    if (nrow(dd)) dd <- dd[order(dd$game_num), , drop = FALSE]
+    lapply(seq_len(nrow(dd)), function(i) {
+      tags$div(
+        class = "card",
+        style = paste0(
+          "margin:10px 0;padding:", pad_px, "px;background:", card_bg, ";",
+          "border:", card_border, ";border-radius:9px;",
+          "font-size:", card_fs, "px;line-height:1.22;",
+          "min-height:", min_h, "px;white-space:normal;",
+          "box-shadow:0 2px 5px rgba(0,0,0,.10);"
+        ),
+        tags$div(style = paste0("font-weight:700;color:", team_color, ";"), paste0(dd$team1[i], " vs ", dd$team2[i])),
+        tags$div(style = paste0("font-weight:900;color:", winner_color, ";font-size:", win_fs, "px;margin-top:6px;"),
+                 paste0("W: ", dd$winner[i]))
+      )
+    })
+  }
+
+  one_round_col <- function(rn, width_px = 450, highlight = FALSE, header_bg = NULL,
+                            header_fs = NULL, card_fs = NULL, win_fs = NULL,
+                            team_color = NULL, winner_color = NULL, card_border = NULL,
+                            card_bg = "white", min_h = NULL) {
+    header_bg <- header_bg %||% if (highlight) "#8B0000" else "#08306B"
+    header_fs <- header_fs %||% if (highlight) 31 else 26
+    card_fs   <- card_fs   %||% if (highlight) 26 else 23
+    win_fs    <- win_fs    %||% if (highlight) 25 else 21
+    team_color   <- team_color   %||% "#111"
+    winner_color <- winner_color %||% "#b00020"
+    card_border  <- card_border  %||% if (highlight) "3px solid #8B0000" else "2px solid #9a9a9a"
+    pad_px <- if (highlight) 16 else 14
+    min_h  <- min_h %||% if (highlight) 102 else 88
+
+    tags$div(
+      style = paste0("width:", width_px, "px; flex:0 0 ", width_px, "px;"),
+      tags$div(
+        style = paste0(
+          "font-weight:900;text-align:center;padding:12px 10px;",
+          "background:", header_bg, ";color:white;border-radius:8px;",
+          "font-size:", header_fs, "px;line-height:1.15;letter-spacing:.2px;"
+        ), rn
+      ),
+      build_round_cards(rn, card_fs = card_fs, win_fs = win_fs, pad_px = pad_px,
+                        min_h = min_h, card_border = card_border, team_color = team_color,
+                        winner_color = winner_color, card_bg = card_bg)
+    )
+  }
+
+  final_stack_col <- function(width_px = 450) {
+    tags$div(
+      style = paste0("width:", width_px, "px; flex:0 0 ", width_px, "px;"),
+      one_round_col(
+        "Final", width_px = width_px, highlight = TRUE,
+        header_bg = "#0B3D91", header_fs = 31, card_fs = 28, win_fs = 28,
+        team_color = "#0B3D91", winner_color = "#C00000",
+        card_border = "4px solid #0B3D91", card_bg = "#F7FBFF", min_h = 108
+      ),
+      tags$div(style = "height:10px;"),
+      one_round_col(
+        "Third-place match", width_px = width_px, highlight = TRUE,
+        header_bg = "#8B0000", header_fs = 27, card_fs = 24, win_fs = 24,
+        team_color = "#222", winner_color = "#C00000",
+        card_border = "3px solid #B22222", card_bg = "#FFF9F9", min_h = 92
+      )
+    )
+  }
+
+  tags$div(
+    id = "fifa_prediction_path_capture_inner",
+    style = paste0(
+      "padding:20px;border:2px solid #cfcfcf;background:#fafafa;",
+      "width:1470px;max-width:none;box-sizing:border-box;display:inline-block;overflow:visible;",
+      "font-family:Arial,Helvetica,sans-serif;color:#111;"
+    ),
+    tags$div(
+      style = "font-size:36px;font-weight:900;margin-bottom:8px;line-height:1.12;",
+      paste0("Predicted FIFA 2026 knockout path, seed = ", fp$seed)
+    ),
+    tags$div(
+      style = "font-size:24px;font-weight:800;color:#333;margin-bottom:14px;line-height:1.20;",
+      paste0("Champion: ", fp$champion,
+             "  | Runner-up: ", fp$runner_up,
+             "  | Third: ", fp$third,
+             "  | Fourth: ", fp$fourth)
+    ),
+    tags$div(
+      style = "display:flex;gap:22px;align-items:flex-start;",
+      one_round_col("Round of 32", width_px = 430, highlight = FALSE, header_fs = 25, card_fs = 21, win_fs = 20, min_h = 82),
+      tags$div(
+        style = "width:998px; flex:0 0 998px;",
+        tags$div(
+          style = "display:flex;gap:22px;align-items:flex-start;",
+          one_round_col("Round of 16", width_px = 488, highlight = FALSE, header_fs = 26, card_fs = 23, win_fs = 21, min_h = 88),
+          one_round_col("Quarterfinals", width_px = 488, highlight = FALSE, header_fs = 26, card_fs = 23, win_fs = 21, min_h = 88)
+        ),
+        tags$div(
+          style = "margin-top:14px;",
+          tags$div(
+            style = paste0(
+              "padding:16px 16px 18px 16px;border:4px solid #8B0000;",
+              "border-radius:14px;background:#fff7f7;"
+            ),
+            tags$div(
+              style = "font-size:30px;font-weight:900;color:#8B0000;margin-bottom:12px;line-height:1.1;",
+              "Highlighted final pathway"
+            ),
+            tags$div(
+              style = "display:flex;gap:22px;align-items:flex-start;",
+              one_round_col("Semifinals", width_px = 488, highlight = TRUE,
+                            header_bg = "#8B0000", header_fs = 30, card_fs = 26, win_fs = 25,
+                            card_border = "3px solid #B22222", card_bg = "#FFFDFD", min_h = 102),
+              final_stack_col(width_px = 488)
+            )
+          )
+        )
+      )
+    )
+  )
+}
+
+make_fifa_prediction_ssq_html <- function(fp) {
+  mt <- as.data.frame(fp$metrics, stringsAsFactors = FALSE)
+  rows <- lapply(seq_len(nrow(mt)), function(i) {
+    tags$tr(
+      tags$td(as.character(mt$stage[i])),
+      tags$td(as.character(mt$matches[i])),
+      tags$td(sprintf("%.4f", as.numeric(mt$SS[i]))),
+      tags$td(sprintf("%.4f", as.numeric(mt$Q[i])))
+    )
+  })
+  tags$div(
+    style = "margin-top:14px;",
+    tags$h4("SS and Q by stage"),
+    tags$table(class = "table table-striped table-condensed",
+      tags$thead(tags$tr(tags$th("Stage"), tags$th("Matches"), tags$th("Average SS"), tags$th("Overall Q"))),
+      tags$tbody(rows)
+    )
+  )
+}
+
+make_fifa_golden_boot_slope_html <- function(slope_df, top_n = 12) {
+  if (is.null(slope_df) || !is.data.frame(slope_df) || nrow(slope_df) == 0 ||
+      !all(c("player_label", "year", "value") %in% names(slope_df))) {
+    return(tags$div(class = "alert alert-info", "No Golden Boot scorer-level slopegraph data available."))
+  }
+  df0 <- safe_df(slope_df)
+  df0$player_label <- enc2utf8(as.character(df0$player_label))
+  df0$year <- enc2utf8(as.character(df0$year))
+  df0$value <- suppressWarnings(as.numeric(df0$value))
+  df0$value[!is.finite(df0$value) | is.na(df0$value)] <- 0
+  df0 <- df0[nzchar(df0$player_label), , drop = FALSE]
+  if (!nrow(df0)) return(tags$div(class = "alert alert-info", "No valid Golden Boot scorer rows available."))
+
+  last_vals <- stats::aggregate(value ~ player_label, df0, max, na.rm = TRUE)
+  last_vals <- last_vals[order(-last_vals$value, last_vals$player_label), , drop = FALSE]
+  keep <- head(last_vals$player_label, min(top_n, nrow(last_vals)))
+  df0 <- df0[df0$player_label %in% keep, , drop = FALSE]
+  df <- tufte_sort_cc(df0, x = "year", y = "value", group = "player_label", min.space = 0.44)
+  if (!nrow(df)) return(tags$div(class = "alert alert-info", "No Golden Boot slopegraph data available."))
+
+  df$group <- enc2utf8(as.character(df$group))
+  df$x_chr <- enc2utf8(as.character(df$x))
+  x_levels <- order_match_labels_numeric(df$x_chr)
+  df$x_num <- match(df$x_chr, x_levels)
+  df$y <- suppressWarnings(as.numeric(df$y))
+  df$ypos <- suppressWarnings(as.numeric(df$ypos))
+  df <- df[is.finite(df$x_num) & is.finite(df$ypos), , drop = FALSE]
+  if (!nrow(df)) return(tags$div(class = "alert alert-info", "No valid Golden Boot slopegraph coordinates."))
+
+  # V51: extra-large bold fonts with taller vertical layout for clearer labels.
+  ml <- 520; mr <- 360; mt <- 120; mb <- 240
+  W <- max(2600, ml + mr + max(1, length(unique(df$x_chr))) * 390)
+  H <- max(1650, 420 + length(unique(df$group)) * 128)
+  y_min <- min(df$ypos, na.rm = TRUE); y_max <- max(df$ypos, na.rm = TRUE)
+  if (!is.finite(y_min) || !is.finite(y_max) || y_min == y_max) { y_min <- 0; y_max <- 1 }
+  x_to_px <- function(x) ml + (as.numeric(x) - 1) / max(1, length(x_levels) - 1) * (W - ml - mr)
+  y_to_px <- function(y) mt + (y_max - as.numeric(y)) / max(1e-9, y_max - y_min) * (H - mt - mb)
+
+  svg_children <- list(
+    tags$text(x = 28, y = 48, style = "font-size:38px;font-weight:900;fill:#111;", "The chase for the Golden Boot of FIFA 2026"),
+    tags$text(x = 28, y = 84, style = "font-size:22px;font-weight:900;fill:#555;", "Cumulative goals by parsed match order; generated after clicking Draw Golden Boot slopegraph.")
+  )
+  for (i in seq_along(x_levels)) {
+    xp <- x_to_px(i)
+    svg_children <- c(svg_children, list(
+      tags$line(x1 = xp, y1 = mt, x2 = xp, y2 = H - mb, style = "stroke:#dddddd;stroke-width:1.6;"),
+      tags$text(x = xp, y = H - 52, transform = paste0("rotate(-35 ", xp, " ", H - 52, ")"),
+                style = "font-size:19px;font-weight:900;fill:#333;text-anchor:end;", as.character(x_levels[i]))
+    ))
+  }
+  for (g in unique(df$group)) {
+    dd <- df[df$group == g, , drop = FALSE]
+    dd <- dd[order(dd$x_num), , drop = FALSE]
+    pts <- paste(sprintf("%.1f,%.1f", x_to_px(dd$x_num), y_to_px(dd$ypos)), collapse = " ")
+    svg_children <- c(svg_children, list(tags$polyline(points = pts, style = "fill:none;stroke:#cc0000;stroke-width:3.2;")))
+    for (j in seq_len(nrow(dd))) {
+      xp <- x_to_px(dd$x_num[j]); yp <- y_to_px(dd$ypos[j])
+      svg_children <- c(svg_children, list(
+        tags$circle(cx = xp, cy = yp, r = 9, style = "fill:#fff;stroke:#cc0000;stroke-width:2.6;"),
+        tags$text(x = xp, y = yp + 5.5, style = "font-size:16px;font-weight:900;text-anchor:middle;fill:#111;", as.character(round(dd$y[j], 0)))
+      ))
+    }
+  }
+  first_rows <- df[df$x_num == 1, c("group", "ypos"), drop = FALSE]
+  first_rows <- first_rows[!duplicated(first_rows$group), , drop = FALSE]
+  first_rows <- first_rows[order(first_rows$ypos), , drop = FALSE]
+  for (i in seq_len(nrow(first_rows))) {
+    svg_children <- c(svg_children, list(tags$text(
+      x = ml - 22, y = y_to_px(first_rows$ypos[i]) + 6,
+      style = "font-size:22px;font-weight:900;text-anchor:end;fill:#111;", as.character(first_rows$group[i])
+    )))
+  }
+  tags$div(
+    style = paste0("border:1px solid #ddd; background:#fff; padding:12px; margin-top:8px; min-width:", W, "px; width:", W, "px; box-sizing:border-box;"),
+    tags$svg(width = W, height = H, viewBox = paste("0 0", W, H), xmlns = "http://www.w3.org/2000/svg", svg_children)
+  )
+}
+
 server <- function(input, output, session) {
-  rv <- reactiveValues(result = NULL, status = "V30 TRUE REBUILD loaded. Click Run analysis, Run FIFA 2026 bundled XLSX, REAL Update FIFA online, or Run NBA demo.", error = NULL)
+  rv <- reactiveValues(result = NULL, status = "V32 TRUE REBUILD loaded. Click Run analysis, Run FIFA 2026 bundled XLSX, REAL Update FIFA online, or Run NBA demo.", error = NULL)
 
   get_input_data <- function(mode, progress = NULL) {
     if (identical(mode, "demo")) {
@@ -2509,7 +3878,9 @@ server <- function(input, output, session) {
       }
       wb <- read_excel_workbook(fifa_path)
       return(list(nodes = wb$nodes, edges = wb$edges,
-                  group_performance_summary = make_fifa_group_performance_summary(wb$nodes, reporting_date = file.info(fifa_path)$mtime),
+                  group_performance_summary = if (!is.null(wb$group_performance_summary)) wb$group_performance_summary else make_fifa_group_performance_summary(wb$nodes, reporting_date = file.info(fifa_path)$mtime),
+                  golden_boot_summary = wb$golden_boot_summary,
+                  golden_boot_slope = wb$golden_boot_slope,
                   data_mode = paste0("FIFA 2026 demo from bundled XLSX: ", basename(fifa_path))))
     }
     if (identical(mode, "fifa2026_online")) {
@@ -2547,7 +3918,7 @@ server <- function(input, output, session) {
 
   run_analysis <- function(mode = NULL) {
     mode <- mode %||% (input$input_mode %||% "demo_csv")
-    rv$status <- paste0("V30 RUN RECEIVED at ", format(Sys.time(), "%H:%M:%S"), "\nMode: ", mode, "\nStarting analysis...")
+    rv$status <- paste0("V32 RUN RECEIVED at ", format(Sys.time(), "%H:%M:%S"), "\nMode: ", mode, "\nStarting analysis...")
 
     tryCatch({
       progress_fun <- NULL
@@ -2575,12 +3946,27 @@ server <- function(input, output, session) {
       } else if (identical(mode, "demo_fifa2026_xlsx")) {
         out$group_performance_summary <- make_fifa_group_performance_summary(dat$nodes, reporting_date = Sys.time())
       }
+      if (!is.null(dat$golden_boot_summary)) {
+        out$golden_boot_summary <- dat$golden_boot_summary
+      }
+      if (!is.null(dat$golden_boot_slope)) {
+        out$golden_boot_slope <- dat$golden_boot_slope
+      }
+      if (!is.null(dat$scorers_source)) {
+        out$scorers_source <- dat$scorers_source
+      }
+      if (identical(mode, "fifa2026_online") || identical(mode, "demo_fifa2026_xlsx")) {
+        out$fifa_prediction <- make_fifa_prediction_from_nodes(
+          out$nodes,
+          seed_value = input$fifa_prediction_seed %||% 20260621
+        )
+      }
       out$data_mode <- dat$data_mode
       out$input_nodes_n <- nrow(out$nodes)
       out$input_edges_n <- nrow(out$edges)
       rv$result <- out
       extra_online <- if (!is.null(dat$online_details)) paste0("\n", dat$online_details) else ""
-      rv$status <- paste0("V30 ANALYSIS COMPLETED at ", format(Sys.time(), "%H:%M:%S"),
+      rv$status <- paste0("V32 ANALYSIS COMPLETED at ", format(Sys.time(), "%H:%M:%S"),
                           "\nInput mode: ", out$data_mode,
                           "\nNodes: ", out$input_nodes_n,
                           "\nEdges: ", out$input_edges_n,
@@ -2588,7 +3974,7 @@ server <- function(input, output, session) {
                           "\nCore: ", out$status_note)
     }, error = function(e) {
       rv$error <- conditionMessage(e)
-      rv$status <- paste0("V30 ANALYSIS STOPPED SAFELY at ", format(Sys.time(), "%H:%M:%S"), "\nMode: ", mode, "\nError: ", conditionMessage(e))
+      rv$status <- paste0("V32 ANALYSIS STOPPED SAFELY at ", format(Sys.time(), "%H:%M:%S"), "\nMode: ", mode, "\nError: ", conditionMessage(e))
     })
   }
 
@@ -2635,6 +4021,228 @@ server <- function(input, output, session) {
     gs <- fifa_group_summary_reactive()
     datatable(gs, rownames = FALSE, escape = FALSE, options = list(pageLength = 12, scrollX = TRUE, ordering = FALSE), class = "stripe hover")
   })
+
+  fifa_golden_boot_reactive <- reactive({
+    req(res())
+    gb <- res()$golden_boot_summary
+    if (is.null(gb) || !is.data.frame(gb) || nrow(gb) == 0) {
+      return(empty_golden_boot_summary())
+    }
+    gb
+  })
+  fifa_golden_boot_slope_reactive <- reactive({
+    req(res())
+    sl <- res()$golden_boot_slope
+    if (is.null(sl) || !is.data.frame(sl) || nrow(sl) == 0) {
+      return(empty_golden_boot_slope())
+    }
+    sl
+  })
+  fifa_golden_boot_date_text <- reactive({
+    gb <- fifa_golden_boot_reactive()
+    if ("reporting_date" %in% names(gb) && nrow(gb) > 0) {
+      paste0("Reporting date: ", unique(gb$reporting_date)[1], " | Golden Boot rows shown: ", nrow(gb))
+    } else {
+      "Reporting date: not available"
+    }
+  })
+  output$fifa_golden_boot_date_sidebar <- renderUI({
+    tags$small(tags$b(fifa_golden_boot_date_text()))
+  })
+  output$fifa_golden_boot_date_main <- renderUI({
+    tags$p(tags$b(fifa_golden_boot_date_text()))
+  })
+  output$fifa_golden_boot_plot_note_sidebar <- renderUI({
+    tags$small("Click Draw Golden Boot slopegraph after the FIFA online update. The slopegraph is rendered as HTML/SVG for Windows safety.")
+  })
+  output$fifa_golden_boot_plot_note_main <- renderUI({
+    tags$p("Click Draw Golden Boot slopegraph after the FIFA online update. The slopegraph is rendered as HTML/SVG for Windows safety.")
+  })
+  output$fifa_golden_boot_sidebar <- renderDT({
+    gb <- fifa_golden_boot_reactive()
+    if ("reporting_date" %in% names(gb)) gb <- gb[, setdiff(names(gb), "reporting_date"), drop = FALSE]
+    datatable(gb, rownames = FALSE, escape = TRUE, options = list(pageLength = 10, scrollX = TRUE, dom = "t", ordering = FALSE), class = "compact stripe")
+  })
+  output$fifa_golden_boot_main <- renderDT({
+    gb <- fifa_golden_boot_reactive()
+    datatable(gb, rownames = FALSE, escape = TRUE, options = list(pageLength = 15, scrollX = TRUE, ordering = TRUE), class = "stripe hover")
+  })
+  golden_boot_plot_state <- reactiveVal(NULL)
+
+  observeEvent(input$run_fifa_golden_boot_plot, {
+    if (is.null(res())) {
+      showNotification("Run Update FIFA 2026 online and run first.", type = "warning")
+      return(NULL)
+    }
+    sl <- fifa_golden_boot_slope_reactive()
+    golden_boot_plot_state(sl)
+    showNotification("Golden Boot slopegraph generated from the current scorer table.", type = "message")
+  }, ignoreInit = TRUE)
+
+  golden_boot_plot_reactive <- reactive({
+    sl <- golden_boot_plot_state()
+    validate(need(!is.null(sl), "Click Draw Golden Boot slopegraph after the current FIFA table has been generated."))
+    sl
+  })
+
+  output$fifa_golden_boot_slope_html <- renderUI({
+    sl <- golden_boot_plot_state()
+    if (is.null(sl)) {
+      return(tags$div(class = "alert alert-info", "Click Draw Golden Boot slopegraph after the current FIFA table has been generated."))
+    }
+    make_fifa_golden_boot_slope_html(sl, top_n = 12)
+  })
+
+  observeEvent(input$download_fifa_golden_boot_png_client, {
+    sl <- golden_boot_plot_state()
+    if (is.null(sl)) {
+      showNotification("Draw Golden Boot slopegraph first.", type = "warning")
+      return(NULL)
+    }
+    session$sendCustomMessage("fifaDownloadElementPNG", list(
+      id = "fifa_golden_boot_capture",
+      filename = paste0("fifa2026_golden_boot_slopegraph_", Sys.Date(), ".png")
+    ))
+  }, ignoreInit = TRUE)
+
+  output$download_fifa_golden_boot_html <- downloadHandler(
+    filename = function() paste0("fifa2026_golden_boot_slopegraph_", Sys.Date(), ".html"),
+    contentType = "text/html; charset=utf-8",
+    content = function(file) {
+      sl <- golden_boot_plot_reactive()
+      save_tag_as_html(make_fifa_golden_boot_slope_html(sl, top_n = 12), file,
+                       title = "FIFA 2026 Golden Boot slopegraph")
+    }
+  )
+
+  # Prediction is generated ONLY when this separate button is clicked.
+  # This avoids automatic plotting during Data tab loading and keeps the result
+  # based on the current Table 1 nodes from the latest online/bundled run.
+  fifa_prediction_state <- reactiveVal(NULL)
+
+  observeEvent(input$run_fifa_prediction_plot, {
+    if (is.null(res())) {
+      showNotification("Run Update FIFA 2026 online and run first.", type = "warning")
+      return(NULL)
+    }
+    nd <- res()$nodes
+    if (!is.data.frame(nd) || nrow(nd) < 48) {
+      showNotification("Prediction needs the current Table 1 with 48 teams. Please update FIFA 2026 online first.", type = "error")
+      return(NULL)
+    }
+    seed_now <- suppressWarnings(as.integer(input$fifa_prediction_seed %||% 20260621))
+    if (!is.finite(seed_now) || is.na(seed_now)) seed_now <- 20260621L
+    fp <- tryCatch(
+      make_fifa_prediction_from_nodes(nd, seed_value = seed_now),
+      error = function(e) {
+        showNotification(paste("Prediction error:", conditionMessage(e)), type = "error", duration = 10)
+        NULL
+      }
+    )
+    if (is.null(fp)) return(NULL)
+    fifa_prediction_state(fp)
+    showNotification("Prediction path generated from current Table 1.", type = "message")
+  }, ignoreInit = TRUE)
+
+  fifa_prediction_reactive <- reactive({
+    fp <- fifa_prediction_state()
+    validate(need(!is.null(fp), "Click Run FIFA 2026 prediction plot after the current Table 1 has been generated."))
+    fp
+  })
+
+  output$fifa_prediction_seed_note <- renderUI({
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      return(tags$p(tags$b("Prediction not yet generated."),
+                    " Click Run FIFA 2026 prediction plot after Table 1 appears."))
+    }
+    tags$p(
+      tags$b(paste0("Seed: ", fp$seed)),
+      paste0(" | Champion: ", fp$champion,
+             " | Runner-up: ", fp$runner_up,
+             " | Third: ", fp$third,
+             " | Fourth: ", fp$fourth,
+             " | Prediction = 0.7 × Table 1 points + 0.3 × mixed prior")
+    )
+  })
+
+  output$fifa_prediction_metrics_table <- renderDT({
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      return(datatable(data.frame(message = "Click Run FIFA 2026 prediction plot."), rownames = FALSE, options = list(dom = "t")))
+    }
+    datatable(fp$metrics, rownames = FALSE,
+              options = list(pageLength = 8, scrollX = TRUE, dom = "t"),
+              class = "stripe hover")
+  })
+
+  output$fifa_prediction_path_table <- renderDT({
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      return(datatable(data.frame(message = "Prediction path not yet generated."), rownames = FALSE, options = list(dom = "t")))
+    }
+    datatable(fp$path, rownames = FALSE, escape = TRUE,
+              options = list(pageLength = 31, scrollX = TRUE),
+              class = "stripe hover")
+  })
+
+  output$fifa_prediction_path_html <- renderUI({
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      return(tags$div(class = "alert alert-info", "Click Run FIFA 2026 prediction plot after the current Table 1 has been generated."))
+    }
+    make_fifa_prediction_path_html(fp)
+  })
+
+  output$fifa_prediction_ssq_html <- renderUI({
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) return(NULL)
+    make_fifa_prediction_ssq_html(fp)
+  })
+
+  observeEvent(input$download_fifa_prediction_path_png_client, {
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      showNotification("Run FIFA 2026 prediction plot first.", type = "warning")
+      return(NULL)
+    }
+    session$sendCustomMessage("fifaDownloadElementPNG", list(
+      id = "fifa_prediction_path_capture",
+      filename = paste0("fifa2026_prediction_path_seed_", fp$seed, ".png")
+    ))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$download_fifa_prediction_ssq_png_client, {
+    fp <- fifa_prediction_state()
+    if (is.null(fp)) {
+      showNotification("Run FIFA 2026 prediction plot first.", type = "warning")
+      return(NULL)
+    }
+    session$sendCustomMessage("fifaDownloadElementPNG", list(
+      id = "fifa_prediction_ssq_capture",
+      filename = paste0("fifa2026_prediction_ss_q_seed_", fp$seed, ".png")
+    ))
+  }, ignoreInit = TRUE)
+
+  output$download_fifa_prediction_path_html <- downloadHandler(
+    filename = function() paste0("fifa2026_prediction_path_seed_", fifa_prediction_reactive()$seed, ".html"),
+    contentType = "text/html; charset=utf-8",
+    content = function(file) {
+      fp <- fifa_prediction_reactive()
+      save_tag_as_html(htmltools::tagList(make_fifa_prediction_path_html(fp), make_fifa_prediction_ssq_html(fp)),
+                       file, title = "FIFA 2026 prediction path")
+    }
+  )
+
+  output$download_fifa_prediction_ssq_html <- downloadHandler(
+    filename = function() paste0("fifa2026_prediction_ss_q_seed_", fifa_prediction_reactive()$seed, ".html"),
+    contentType = "text/html; charset=utf-8",
+    content = function(file) {
+      fp <- fifa_prediction_reactive()
+      save_tag_as_html(make_fifa_prediction_ssq_html(fp), file, title = "FIFA 2026 SS and Q")
+    }
+  )
+
   output$tbl_reduced <- renderDT({ req(res()); datatable(res()$edges_reduced, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE)) })
   output$tbl_memberships <- renderDT({ req(res()); datatable(res()$memberships_df, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE)) })
   output$tbl_quality <- renderDT({ req(res()); datatable(res()$quality_df, rownames = FALSE, options = list(pageLength = 15, scrollX = TRUE)) })
@@ -2650,12 +4258,170 @@ server <- function(input, output, session) {
     datatable(nd, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE, autoWidth = TRUE))
   })
   output$flca_step1_edges <- renderDT({ req(res()); datatable(res()$edges, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE)) })
-  output$flca_step2_full_graph <- renderVisNetwork({ req(res()); make_vis(res()$g_full, res()$memberships_df$louvain, top_n = 30, title = "Step 2 full graph", label_size = 24, bold = TRUE) })
-  output$flca_step3_reduced_graph <- renderVisNetwork({ req(res()); make_vis(res()$g_flca, res()$flca_carac, top_n = NULL, title = paste0("Step 3 FLCA reduced graph colored by preserved clusters | ", res()$cluster_source), label_size = 24, bold = TRUE) })
+  output$flca_step2_full_graph <- renderVisNetwork({
+    req(res())
+    bun <- make_flca_process_top_bundle(res(), target_n = input$flca_target_nodes %||% 20)
+    make_vis(bun$g, bun$membership, top_n = NULL, title = "Step 2 full graph: same capped Top-20 nodes used in all FLCA Process plots", label_size = 24, bold = TRUE)
+  })
+  output$flca_step3_reduced_graph <- renderVisNetwork({
+    req(res())
+    bun <- make_flca_process_top_bundle(res(), target_n = input$flca_target_nodes %||% 20)
+    make_vis(bun$g, bun$membership, top_n = NULL, title = paste0("Step 3 FLCA reduced graph: same capped Top-20 nodes | ", res()$cluster_source), label_size = 24, bold = TRUE)
+  })
   output$flca_step4_cluster_summary <- renderDT({ req(res()); g <- res()$g_flca; mem <- res()$flca_carac; if (!is.null(names(mem)) && all(igraph::V(g)$name %in% names(mem))) mem <- mem[igraph::V(g)$name]; mem <- norm_mem(mem, igraph::vcount(g)); df <- data.frame(cluster = mem, value = suppressWarnings(as.numeric(igraph::V(g)$value))); sm <- aggregate(value ~ cluster, df, function(x) c(n = length(x), total = sum(x, na.rm = TRUE))); out <- data.frame(cluster = sm$cluster, n = sm$value[, "n"], total_value = sm$value[, "total"], cluster_source = res()$cluster_source); datatable(out, rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE)) })
-  output$flca_step5_sankeymatic_code <- renderPrint({ req(res()); ed <- res()$edges_reduced; cat(paste(paste0(ed$Leader, " [", round(ed$WCD, 3), "] ", ed$follower), collapse = "\n")) })
+  flca_step5_sankey_data <- reactive({
+    req(res())
+    make_flca_sankey_data(res(), target_n = input$flca_target_nodes %||% 20)
+  })
+
+  output$flca_step5_sankey_plot <- renderPlot({
+    req(flca_step5_sankey_data())
+    plot_flca_sankey_static(flca_step5_sankey_data())
+  }, width = 1400, height = 760, res = 120)
+
+  output$flca_step5_sankeymatic_code <- renderPrint({
+    req(flca_step5_sankey_data())
+    cat(flca_step5_sankey_data()$code)
+  })
   output$flca_step6_ssplot <- renderPlot({ req(res()); render_real_SSplot82_panel(res(), target_n = input$flca_target_nodes %||% 20) }, width = 1300, height = 920, res = 120)
-  output$flca_step6_kano <- renderPlot({ req(res()); print(make_flca_value_value2_kano(res(), label_size = 4)) }, width = 1100, height = 760, res = 120)
+  output$flca_step6_kano <- renderPlot({ req(res()); print(make_flca_value_value2_kano(res(), label_size = 3.6, visual_ratio = 0.10, target_n = input$flca_target_nodes %||% 20)) }, width = 1800, height = 920, res = 120)
+
+  # Step 6c chord dashboard: final Top-N FLCA/SSplot nodes and their final edges.
+  flca_step6c_chord_data <- reactive({
+    req(res())
+    make_flca_chord_data(res(), target_n = input$flca_target_nodes %||% 20)
+  })
+
+  output$flca_step6c_chord_note <- renderPrint({
+    req(flca_step6c_chord_data())
+    chd <- flca_step6c_chord_data()
+    cat(chd$note, "\n")
+    cat("Install install.packages('circlize') if the chord panel is not shown. V40 uses a custom static chord for exact node consistency.")
+  })
+
+  output$flca_step6c_chord_ui <- renderUI({
+    tagList(
+      plotOutput("flca_step6c_chord_static", height = "860px", width = "100%"),
+      tags$p(tags$em("V40 uses a custom circlize chord so sectors are based on the identical Top-20 node table, not an edge-only matrix."))
+    )
+  })
+
+  output$flca_step6c_chord_static <- renderPlot({
+    req(flca_step6c_chord_data())
+    plot_flca_chord_static(flca_step6c_chord_data())
+  }, width = 1400, height = 900, res = 120)
+
+  output$flca_step6c_chord_nodes <- renderDT({
+    req(flca_step6c_chord_data())
+    datatable(flca_step6c_chord_data()$nodes, rownames = FALSE, options = list(pageLength = 20, scrollX = TRUE))
+  })
+
+  output$flca_step6c_chord_edges <- renderDT({
+    req(flca_step6c_chord_data())
+    datatable(flca_step6c_chord_data()$edges, rownames = FALSE, options = list(pageLength = 20, scrollX = TRUE))
+  })
+
+  output$download_flca_step6c_chord_edges <- downloadHandler(
+    filename = function() paste0("flca_step6c_chord_edges_", Sys.Date(), ".csv"),
+    content = function(file) {
+      chd <- flca_step6c_chord_data()
+      utils::write.csv(chd$edges, file, row.names = FALSE, fileEncoding = "UTF-8")
+    }
+  )
+
+  # PNG downloads for all server-rendered FLCA Process plots.
+  save_png_device <- function(file, width = 1300, height = 920, res = 120, expr) {
+    grDevices::png(file, width = width, height = height, res = res)
+    on.exit(grDevices::dev.off(), add = TRUE)
+    par(family = "sans")
+    force(expr)
+  }
+
+  output$download_flca_step2_png <- downloadHandler(
+    filename = function() paste0("flca_step2_full_network_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(res())
+      bun <- make_flca_process_top_bundle(res(), target_n = input$flca_target_nodes %||% 20)
+      save_png_device(file, width = 1500, height = 1000, res = 130,
+        plot_static_network_png(bun$g, bun$membership, title = "Step 2 full graph: same capped Top-20 nodes", top_n = NULL)
+      )
+    }
+  )
+
+  output$download_flca_step3_png <- downloadHandler(
+    filename = function() paste0("flca_step3_reduced_network_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(res())
+      bun <- make_flca_process_top_bundle(res(), target_n = input$flca_target_nodes %||% 20)
+      save_png_device(file, width = 1500, height = 1000, res = 130,
+        plot_static_network_png(bun$g, bun$membership, title = paste0("Step 3 FLCA reduced graph: same capped Top-20 nodes | ", res()$cluster_source), top_n = NULL)
+      )
+    }
+  )
+
+  output$download_flca_step5_sankey_png <- downloadHandler(
+    filename = function() paste0("flca_step5b_sankey_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(flca_step5_sankey_data())
+      save_png_device(file, 1400, 760, 120, plot_flca_sankey_static(flca_step5_sankey_data()))
+    }
+  )
+
+  output$download_flca_step6_ssplot_png <- downloadHandler(
+    filename = function() paste0("flca_step6_ssplot_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(res())
+      save_png_device(file, width = 1600, height = 1100, res = 140,
+        render_real_SSplot82_panel(res(), target_n = input$flca_target_nodes %||% 20)
+      )
+    }
+  )
+
+  output$download_flca_step6_kano_png <- downloadHandler(
+    filename = function() paste0("flca_step6b_kano_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(res())
+      save_png_device(file, width = 1900, height = 1100, res = 140,
+        print(make_flca_value_value2_kano(res(), label_size = 3.6, visual_ratio = 0.10, target_n = input$flca_target_nodes %||% 20))
+      )
+    }
+  )
+
+  output$download_flca_step6c_chord_png <- downloadHandler(
+    filename = function() paste0("flca_step6c_chord_", Sys.Date(), ".png"),
+    content = function(file) {
+      req(flca_step6c_chord_data())
+      save_png_device(file, width = 1500, height = 1200, res = 140,
+        plot_flca_chord_static(flca_step6c_chord_data())
+      )
+    }
+  )
+
+  output$download_flca_process_all_png_zip <- downloadHandler(
+    filename = function() paste0("flca_process_pngs_", Sys.Date(), ".zip"),
+    content = function(file) {
+      req(res())
+      tmpd <- tempfile("flca_process_pngs_")
+      dir.create(tmpd, recursive = TRUE, showWarnings = FALSE)
+      f2 <- file.path(tmpd, "step2_full_network.png")
+      f3 <- file.path(tmpd, "step3_reduced_network.png")
+      f5b <- file.path(tmpd, "step5b_sankey.png")
+      f6 <- file.path(tmpd, "step6_ssplot.png")
+      f6b <- file.path(tmpd, "step6b_kano.png")
+      f6c <- file.path(tmpd, "step6c_chord.png")
+      bun <- make_flca_process_top_bundle(res(), target_n = input$flca_target_nodes %||% 20)
+      save_png_device(f2, 1500, 1000, 130, plot_static_network_png(bun$g, bun$membership, title = "Step 2 full graph: same capped Top-20 nodes", top_n = NULL))
+      save_png_device(f3, 1500, 1000, 130, plot_static_network_png(bun$g, bun$membership, title = paste0("Step 3 FLCA reduced graph: same capped Top-20 nodes | ", res()$cluster_source), top_n = NULL))
+      save_png_device(f6, 1600, 1100, 140, render_real_SSplot82_panel(res(), target_n = input$flca_target_nodes %||% 20))
+      save_png_device(f6b, 1900, 1100, 140, print(make_flca_value_value2_kano(res(), label_size = 3.6, visual_ratio = 0.10, target_n = input$flca_target_nodes %||% 20)))
+      save_png_device(f5b, 1400, 760, 120, plot_flca_sankey_static(flca_step5_sankey_data()))
+      save_png_device(f6c, 1500, 1200, 140, plot_flca_chord_static(flca_step6c_chord_data()))
+      oldwd <- getwd(); on.exit(setwd(oldwd), add = TRUE)
+      setwd(tmpd)
+      utils::zip(zipfile = file, files = basename(c(f2, f3, f5b, f6, f6b, f6c)))
+    }
+  )
+
   output$flca_mode_annotation <- renderPrint({ req(res()); cat(paste("FLCA mode:", res()$flca_mode, "; cluster source:", res()$cluster_source, "; original uploaded cluster used:", res()$original_clusters_used, "; V30 stable rebuild with REAL FIFA online Wikipedia update, FIFA/NBA demo buttons, and 3 downloadable demo data files.")) })
   output$plot_visual_quality_kano <- renderPlot({
     req(res())
