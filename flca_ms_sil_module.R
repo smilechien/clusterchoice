@@ -22,6 +22,44 @@ normalize_nodes <- function(nodes){
   nodes
 }
 
+
+
+# ------------------------------------------------------------
+# FLCA mode helper
+# ------------------------------------------------------------
+# cluster_by controls which node score drives FLCA leader/follower direction,
+# leader ranking, cluster propagation, and major sampling.
+#   cluster_by = "value"  -> maturity mode (default)
+#   cluster_by = "value2" -> influence mode
+prepare_nodes_for_flca_mode <- function(nodes, cluster_by = "value"){
+  nodes <- as.data.frame(nodes, stringsAsFactors = FALSE)
+  if (!"name" %in% names(nodes)) names(nodes)[1] <- "name"
+  if (!"value" %in% names(nodes)) stop("nodes must contain value for maturity mode")
+  if (!"value2" %in% names(nodes)) nodes$value2 <- nodes$value
+
+  cluster_by <- as.character(cluster_by %||% "value")[1]
+  if (!cluster_by %in% c("value", "value2")) cluster_by <- "value"
+  if (!cluster_by %in% names(nodes)) cluster_by <- "value"
+
+  nodes$name <- trimws(as.character(nodes$name))
+  nodes$value <- suppressWarnings(as.numeric(nodes$value))
+  nodes$value2 <- suppressWarnings(as.numeric(nodes$value2))
+  nodes$value[!is.finite(nodes$value)] <- 0
+  nodes$value2[!is.finite(nodes$value2)] <- nodes$value[!is.finite(nodes$value2)]
+
+  # Preserve the two scientific meanings for display/export.
+  nodes$maturity_value <- nodes$value
+  nodes$influence_value2 <- nodes$value2
+
+  # flca_score is the active score. Existing FLCA code is value-based, so
+  # we safely map the selected score into value before running FLCA.
+  nodes$flca_score <- suppressWarnings(as.numeric(nodes[[cluster_by]]))
+  nodes$flca_score[!is.finite(nodes$flca_score)] <- 0
+  nodes$flca_cluster_by <- cluster_by
+  nodes$value <- nodes$flca_score
+  nodes
+}
+
 normalize_edges <- function(edges){
   names(edges)[1:2] <- c("Source","Target")
   edges$Source <- as.character(edges$Source)
@@ -86,9 +124,9 @@ fix_edge_cols <- function(ed){
 # ------------------------------------------------------------
 # ============================================================
 # preprocess_edges.R  (fully working)
-# - Leader/follower direction decided by nodes$value (higher = Leader)
+# - Leader/follower direction decided by selected FLCA score: value (maturity) or value2 (influence)
 # - For each follower: keep only the strongest incoming edge
-#   (tie-break by adding Leader's value / 10000 to WCD for ranking only)
+#   (tie-break by adding Leader's selected score / 10000 to WCD for ranking only)
 # - Aggregate duplicated (Leader,follower) by sum(WCD)
 # ============================================================
 
@@ -96,22 +134,12 @@ suppressPackageStartupMessages({
   library(dplyr)
 })
 
-# Optional pretty printer (safe even if you don't care)
-print_stage <- function(title, x, n = 10) {
-  cat("\n==============================\n")
-  cat(title, "\n")
-  cat("==============================\n")
-  if (is.data.frame(x)) {
-    print(utils::head(x, n))
-    cat(sprintf("[nrow=%d, ncol=%d]\n", nrow(x), ncol(x)))
-  } else {
-    print(x)
-  }
-  invisible(x)
-}
+# Keep the verbose-aware print_stage defined above. The former second
+# definition masked it and made FLCA_nodes_edges(..., verbose = FALSE) fail.
 
-preprocess_edges <- function(nodes, edges, verbose = TRUE) {
+preprocess_edges <- function(nodes, edges, verbose = TRUE, cluster_by = "value") {
 
+  nodes <- prepare_nodes_for_flca_mode(nodes, cluster_by = cluster_by)
   df <- as.data.frame(edges, stringsAsFactors = FALSE)
   if (ncol(df) < 3) stop("edges must have at least 3 columns")
 
@@ -193,16 +221,16 @@ preprocess_edges <- function(nodes, edges, verbose = TRUE) {
   node_df$value <- suppressWarnings(as.numeric(node_df$value))
   node_wcd <- setNames(node_df$value, node_df$name)
 
-  # base tie-break uses Leader's node value; tiny perturbation keeps ordering stable
+  # Node rank breaks only exact WCD ties. Never let node value override a
+  # strictly stronger original edge.
   df$source_WCD <- suppressWarnings(as.numeric(node_wcd[df$Leader]))
   df$source_WCD[!is.finite(df$source_WCD)] <- 0
-  df$WCD_adj <- as.numeric(df$WCD) + df$source_WCD / 10000
 
   # ---- 6) EXACTLY ONE edge per follower (NO ties) ----
-  # Deterministic: highest WCD_adj, then highest source_WCD, then Leader name
+  # Deterministic: highest WCD, then highest-ranked Leader, then name.
   relation_set_one <- df %>%
     group_by(follower) %>%
-    arrange(desc(WCD_adj), desc(source_WCD), Leader) %>%
+    arrange(desc(WCD), desc(source_WCD), Leader) %>%
     slice(1) %>%
     ungroup()
 
@@ -231,9 +259,9 @@ preprocess_edges <- function(nodes, edges, verbose = TRUE) {
 #   nodes: 至少 name, value(可選 value2)                 #
 #   edges: 至少三欄,前兩欄節點名,第三欄 WCD              #
 #----------------------------------------------------------#
-FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE) {
+FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE, cluster_by = "value") {
     
-    nd <- nodes
+    nd <- prepare_nodes_for_flca_mode(nodes, cluster_by = cluster_by)
     
     if (!"value2" %in% names(nd)) nd$value2 <- nd$value
     
@@ -249,7 +277,7 @@ FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE) {
     print_stage("Stage A initial nodes", nd, verbose = verbose)
     
     # Stage B: Leader/follower 邊 + 每個 follower 保留一個 leader
-    ed_all <- preprocess_edges(nd, edges, verbose = TRUE)
+    ed_all <- preprocess_edges(nd, edges, verbose = TRUE, cluster_by = cluster_by)
     
     ed_all <- ed_all %>%
         dplyr::filter(Leader   %in% nd$name,
@@ -276,7 +304,7 @@ FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE) {
     leader_counts <- table(ed_one$Leader)
     true_leaders <- names(leader_counts[leader_counts >= 2])
     
-    # 一定把「value 最大的節點」列為 leader
+    # 一定把「selected FLCA score 最大的節點」列為 leader
     if (nrow(nd) > 0) {
         top1_name <- nd$name[1]
         true_leaders <- union(true_leaders, top1_name)
@@ -383,7 +411,7 @@ FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE) {
     print_stage("Stage E after small-cluster bubble-up", nd, verbose = verbose)
     
     # 最後: cluster 重新編號成 1,2,3,...（穩定規則：以每群最高 value2/value 由大到小）
-    score_vec <- if ("value2" %in% names(nd)) nd$value2 else nd$value
+    score_vec <- if ("flca_score" %in% names(nd)) nd$flca_score else nd$value
     # per-cluster score = max(score_vec)
     cs <- tapply(score_vec, nd$cluster, function(x) suppressWarnings(max(as.numeric(x), na.rm = TRUE)))
     cs[is.na(cs)] <- 0
@@ -399,7 +427,7 @@ FLCA_nodes_edges <- function(nodes, edges, verbose = TRUE) {
 
     print_stage("Stage F final clusters", nd, verbose = verbose)
     
-    nodes_out <- nd %>% dplyr::select(name, value, value2, carac,cluster )
+    nodes_out <- nd %>% dplyr::select(dplyr::any_of(c("name", "value", "value2", "maturity_value", "influence_value2", "flca_score", "flca_cluster_by", "carac", "cluster")))
     edges_out <- ed_one %>% dplyr::arrange(dplyr::desc(WCD))
     
     list(nodes = nodes_out, data = edges_out)
@@ -968,7 +996,7 @@ cat("Top 1 Leadership Type:", Top1type, "\n")
   return(result)
 } #function(result)
 # ---- Wrapper: standardize output for the app ----
-FLCA_run <- function(network) {
+FLCA_run <- function(network, cluster_by = "value") {
   # network: list(nodes=..., data=...)
   # In the original implementation FLCA() relies on global variables
   # `nodes` and `data`. We assign them here for backward compatibility.
@@ -977,6 +1005,7 @@ FLCA_run <- function(network) {
   if (!is.list(network) || is.null(network$nodes) || is.null(network$data)) {
     stop("FLCA_run(network) requires a list with $nodes and $data")
   }
+  network$nodes <- prepare_nodes_for_flca_mode(network$nodes, cluster_by = cluster_by)
   n_nodes <- nrow(network$nodes)
   # If fewer than 2 nodes, assign each node to its own cluster and return
   # If fewer than 3 nodes, skip the full FLCA logic. For 2 or fewer nodes
@@ -991,6 +1020,11 @@ FLCA_run <- function(network) {
     out_nodes <- data.frame(
       name  = as.character(nn[[nm_col]]),
       value = suppressWarnings(as.numeric(nn[[val_col]])),
+      value2 = if ("value2" %in% names(nn)) suppressWarnings(as.numeric(nn$value2)) else suppressWarnings(as.numeric(nn[[val_col]])),
+      maturity_value = if ("maturity_value" %in% names(nn)) suppressWarnings(as.numeric(nn$maturity_value)) else suppressWarnings(as.numeric(nn[[val_col]])),
+      influence_value2 = if ("influence_value2" %in% names(nn)) suppressWarnings(as.numeric(nn$influence_value2)) else if ("value2" %in% names(nn)) suppressWarnings(as.numeric(nn$value2)) else suppressWarnings(as.numeric(nn[[val_col]])),
+      flca_score = if ("flca_score" %in% names(nn)) suppressWarnings(as.numeric(nn$flca_score)) else suppressWarnings(as.numeric(nn[[val_col]])),
+      flca_cluster_by = cluster_by,
       carac = seq_len(nrow(nn)),
       stringsAsFactors = FALSE
     )
@@ -1024,6 +1058,10 @@ FLCA_run <- function(network) {
       fallback_nodes <- data.frame(
         name      = as.character(nn[[nm_col]]),
         value     = suppressWarnings(as.numeric(nn[[val_col]])),
+        value2    = if ("value2" %in% names(nn)) suppressWarnings(as.numeric(nn$value2)) else suppressWarnings(as.numeric(nn[[val_col]])),
+        maturity_value = if ("maturity_value" %in% names(nn)) suppressWarnings(as.numeric(nn$maturity_value)) else suppressWarnings(as.numeric(nn[[val_col]])),
+        influence_value2 = if ("influence_value2" %in% names(nn)) suppressWarnings(as.numeric(nn$influence_value2)) else if ("value2" %in% names(nn)) suppressWarnings(as.numeric(nn$value2)) else suppressWarnings(as.numeric(nn[[val_col]])),
+        flca_score = if ("flca_score" %in% names(nn)) suppressWarnings(as.numeric(nn$flca_score)) else suppressWarnings(as.numeric(nn[[val_col]])),
         membership= seq_len(nrow(nn)),
         stringsAsFactors = FALSE
       )
@@ -1050,12 +1088,23 @@ FLCA_run <- function(network) {
   # Required columns:
   #   nodes: name, value, carac
   #   data : Leader, follower, WCD
+  nn0 <- network$nodes
+  row_match <- match(as.character(res$name), as.character(nn0$name))
   out_nodes <- data.frame(
     name  = as.character(res$name),
     value = suppressWarnings(as.numeric(res$value)),
+    value2 = suppressWarnings(as.numeric(nn0$value2[row_match])),
+    maturity_value = suppressWarnings(as.numeric(nn0$maturity_value[row_match])),
+    influence_value2 = suppressWarnings(as.numeric(nn0$influence_value2[row_match])),
+    flca_score = suppressWarnings(as.numeric(nn0$flca_score[row_match])),
+    flca_cluster_by = cluster_by,
     carac = as.integer(res$membership),
     stringsAsFactors = FALSE
   )
+  out_nodes$value2[!is.finite(out_nodes$value2)] <- out_nodes$value[!is.finite(out_nodes$value2)]
+  out_nodes$maturity_value[!is.finite(out_nodes$maturity_value)] <- out_nodes$value[!is.finite(out_nodes$maturity_value)]
+  out_nodes$influence_value2[!is.finite(out_nodes$influence_value2)] <- out_nodes$value2[!is.finite(out_nodes$influence_value2)]
+  out_nodes$flca_score[!is.finite(out_nodes$flca_score)] <- out_nodes$value[!is.finite(out_nodes$flca_score)]
   out_data <- data.frame(
     Leader   = as.character(res$Leader),
     follower = as.character(res$follower),
@@ -1070,103 +1119,160 @@ FLCA_run <- function(network) {
 # >>> PATCH MARKER: DATA_SCOPE_FIX_V9_END <<<
 
 # --------------------------
-# 2) Major sampling (Top-20 balanced)
+# 2) Major sampling (20-23 nodes when the target is 20)
 # --------------------------
 major_sample_flca_top20 <- function(nodes, edges,
                                     top_clusters = 5,
                                     base_per_cluster = 4,
-                                    target_n = 20){
+                                    target_n = 20,
+                                    cluster_by = "value",
+                                    max_per_cluster = 4){
     
     stopifnot(is.data.frame(nodes), is.data.frame(edges))
     stopifnot("name" %in% names(nodes), "carac" %in% names(nodes))
     if (!("value" %in% names(nodes))) nodes$value <- 0
     if (!("value2" %in% names(nodes))) nodes$value2 <- nodes$value
     
-    nodes$name   <- as.character(nodes$name)
+    nodes$name   <- trimws(as.character(nodes$name))
     nodes$value  <- suppressWarnings(as.numeric(nodes$value))
     nodes$value2 <- suppressWarnings(as.numeric(nodes$value2))
-    # keep cluster id numeric even if carac is like "C1"
     car0 <- trimws(as.character(nodes$carac))
-    car_int <- suppressWarnings(as.integer(gsub("^C","", toupper(car0))))
+    car_int <- suppressWarnings(as.integer(gsub("^C", "", toupper(car0))))
     if (all(is.na(car_int))) car_int <- as.integer(factor(car0))
     nodes$carac <- car_int
-    nodes$value[is.na(nodes$value)] <- 0
-    nodes$value2[is.na(nodes$value2)] <- nodes$value[is.na(nodes$value2)]
-    nodes$carac[is.na(nodes$carac)] <- 1L
-    
-    edges$Leader   <- as.character(edges$Leader)
-    edges$Follower <- as.character(edges$Follower)
-    edges$WCD      <- suppressWarnings(as.numeric(edges$WCD))
-    edges <- edges[is.finite(edges$WCD) & edges$WCD > 0, , drop=FALSE]
-    
-    # rank clusters
-    cl_size <- tapply(nodes$name, nodes$carac, length)
-    cl_sumv <- tapply(nodes$value, nodes$carac, sum)
-    cl_tbl <- data.frame(
-        carac = as.integer(names(cl_size)),
-        n = as.integer(cl_size),
-        sumv = as.numeric(cl_sumv[names(cl_size)]),
-        stringsAsFactors = FALSE
-    )
-    cl_tbl <- cl_tbl[order(-cl_tbl$n, -cl_tbl$sumv), , drop=FALSE]
-    keep_carac <- head(cl_tbl$carac, top_clusters)
-    
-    picked <- character()
-    remaining <- list()
-    
-    for (cid in keep_carac) {
-        sub <- nodes[nodes$carac == cid, , drop=FALSE]
-        sub <- sub[order(-sub$value, sub$name), , drop=FALSE]
-        take <- head(sub$name, base_per_cluster)
-        picked <- c(picked, take)
-        remaining[[as.character(cid)]] <- sub$name[!(sub$name %in% take)]
+    nodes$value[!is.finite(nodes$value) | is.na(nodes$value)] <- 0
+    nodes$value2[!is.finite(nodes$value2) | is.na(nodes$value2)] <- nodes$value[!is.finite(nodes$value2) | is.na(nodes$value2)]
+    nodes$carac[!is.finite(nodes$carac) | is.na(nodes$carac)] <- 1L
+
+    cluster_by <- as.character(cluster_by %||% "value")[1]
+    if (!cluster_by %in% c("value", "value2") || !cluster_by %in% names(nodes)) cluster_by <- "value"
+    nodes$flca_score <- suppressWarnings(as.numeric(nodes[[cluster_by]]))
+    nodes$flca_score[!is.finite(nodes$flca_score)] <- 0
+
+    target_n <- suppressWarnings(as.integer(target_n))[1]
+    if (!is.finite(target_n) || target_n <= 0) target_n <- 20L
+    max_per_cluster <- suppressWarnings(as.integer(max_per_cluster))[1]
+    if (!is.finite(max_per_cluster) || max_per_cluster <= 0) max_per_cluster <- 4L
+    first_pass_cap <- min(max_per_cluster, 4L)
+
+    # Rank each cluster by its highest-scoring member (the cluster leader).
+    # Members within a cluster follow the same descending score order.
+    nodes_ord <- nodes[order(-nodes$flca_score, -nodes$value2, nodes$name), , drop = FALSE]
+    nodes_ord <- nodes_ord[!duplicated(nodes_ord$name), , drop = FALSE]
+    cluster_members <- split(nodes_ord$name, as.character(nodes_ord$carac))
+    cluster_ids <- unique(as.character(nodes_ord$carac))
+    cluster_sizes <- lengths(cluster_members)
+    # The rank-1 cluster is mandatory, even when it is a singleton.
+    top_cid <- cluster_ids[1]
+    picked <- head(cluster_members[[top_cid]], first_pass_cap)
+
+    # Admit each qualifying cluster in leader-rank order. Never shorten the
+    # final cluster merely to reach 20; its complete capped contribution can
+    # bring a 20-node target to 21, 22, or 23.
+    other_ids <- cluster_ids[cluster_ids != top_cid]
+    for (cid in other_ids[cluster_sizes[other_ids] >= 3L]) {
+        if (length(picked) >= target_n) break
+        picked <- c(picked, head(cluster_members[[cid]], first_pass_cap))
     }
+
+    # If needed, admit one- and two-member clusters in leader-rank order.
+    for (cid in other_ids[cluster_sizes[other_ids] < 3L]) {
+        if (length(picked) >= target_n) break
+        picked <- c(picked, cluster_members[[cid]])
+    }
+
     picked <- unique(picked)
-    
-    # fill round-robin
-    if (length(picked) < target_n) {
-        need <- target_n - length(picked)
-        cids <- as.character(keep_carac)
-        i <- 1
-        while (need > 0 && any(vapply(remaining[cids], length, integer(1)) > 0)) {
-            cid <- cids[((i - 1) %% length(cids)) + 1]
-            if (length(remaining[[cid]]) > 0) {
-                nxt <- remaining[[cid]][1]
-                remaining[[cid]] <- remaining[[cid]][-1]
-                if (!(nxt %in% picked)) {
-                    picked <- c(picked, nxt)
-                    need <- need - 1
-                }
-            }
-            i <- i + 1
-            if (i > 100000) break
-        }
+
+    # Standardize edges and keep only edges whose endpoints are in the exact same
+    # final Top-N set. This keeps SSplot, chord, SankeyMATIC, and network charts
+    # consistent when the module output is used downstream.
+    ed <- as.data.frame(edges, stringsAsFactors = FALSE)
+    if (!all(c("Leader", "Follower") %in% names(ed))) {
+        if (all(c("Leader", "follower") %in% names(ed))) names(ed)[names(ed) == "follower"] <- "Follower"
+        else if (all(c("Source", "Target") %in% names(ed))) names(ed)[match(c("Source", "Target"), names(ed))] <- c("Leader", "Follower")
+        else if (all(c("from", "to") %in% names(ed))) names(ed)[match(c("from", "to"), names(ed))] <- c("Leader", "Follower")
+        else names(ed)[1:2] <- c("Leader", "Follower")
     }
-    
-    # still short: fill by global value
-    if (length(picked) < target_n) {
-        rest <- nodes[!(nodes$name %in% picked), , drop=FALSE]
-        rest <- rest[order(-rest$value, rest$name), , drop=FALSE]
-        picked <- unique(c(picked, head(rest$name, target_n - length(picked))))
+    if (!"WCD" %in% names(ed)) {
+        wcol <- intersect(c("weight", "value", "W"), names(ed))
+        ed$WCD <- if (length(wcol)) ed[[wcol[1]]] else 1
     }
-    
-    sampled_nodes <- nodes[nodes$name %in% picked, , drop=FALSE]
-    sampled_nodes <- sampled_nodes[order(-sampled_nodes$value, sampled_nodes$name), , drop=FALSE]
-    
-    sampled_edges <- edges[edges$Leader %in% picked & edges$Follower %in% picked, , drop=FALSE]
-    sampled_edges <- sampled_edges[, c("Leader","Follower","WCD"), drop=FALSE]
-    
+    ed$Leader <- trimws(as.character(ed$Leader))
+    ed$Follower <- trimws(as.character(ed$Follower))
+    ed$WCD <- suppressWarnings(as.numeric(ed$WCD))
+    ed <- ed[is.finite(ed$WCD) & ed$WCD > 0 & ed$Leader %in% picked & ed$Follower %in% picked, , drop = FALSE]
+    if (nrow(ed)) {
+        # Input endpoints are undirected. Retain the strongest WCD for each
+        # original pair, including reversed and duplicated rows.
+        a <- pmin(ed$Leader, ed$Follower)
+        b <- pmax(ed$Leader, ed$Follower)
+        ed <- data.frame(Leader = a, Follower = b, WCD = ed$WCD)
+        ed <- aggregate(WCD ~ Leader + Follower, data = ed, FUN = max)
+        ed <- ed[order(match(ed$Leader, picked), match(ed$Follower, picked), -ed$WCD), , drop = FALSE]
+    } else {
+        ed <- data.frame(Leader = character(0), Follower = character(0), WCD = numeric(0), stringsAsFactors = FALSE)
+    }
+
+    sampled_nodes <- nodes[match(picked, nodes$name), , drop = FALSE]
+    sampled_nodes <- sampled_nodes[!is.na(sampled_nodes$name), , drop = FALSE]
+    sampled_nodes$selection_rank <- seq_len(nrow(sampled_nodes))
+    sampled_nodes <- sampled_nodes[order(sampled_nodes$selection_rank), , drop = FALSE]
+    sampled_edges <- ed[, c("Leader", "Follower", "WCD"), drop = FALSE]
     list(nodes = sampled_nodes, data = sampled_edges)
 }
 
+# SCI is the structural openness proportion: 1 - Burt constraint.
+# Use the full sampled WCD network before silhouette keeps one follower link.
+# Direction is ignored for this measure.
+compute_top1_sci <- function(nodes, edges, cluster_by = "value") {
+    stopifnot(is.data.frame(nodes), is.data.frame(edges),
+              all(c("name", "value") %in% names(nodes)),
+              all(c("Leader", "Follower", "WCD") %in% names(edges)))
+    if (!nrow(nodes)) stop("compute_top1_sci requires at least one node")
+
+    score_col <- if (identical(cluster_by, "value2") && "value2" %in% names(nodes)) "value2" else "value"
+    score <- suppressWarnings(as.numeric(nodes[[score_col]]))
+    score[!is.finite(score)] <- 0
+    names0 <- trimws(as.character(nodes$name))
+    top1 <- names0[order(-score, names0)[1]]
+
+    w <- matrix(0, nrow(nodes), nrow(nodes), dimnames = list(names0, names0))
+    ed <- edges
+    ed$Leader <- trimws(as.character(ed$Leader))
+    ed$Follower <- trimws(as.character(ed$Follower))
+    ed$WCD <- suppressWarnings(as.numeric(ed$WCD))
+    ed <- ed[is.finite(ed$WCD) & ed$WCD > 0 &
+             ed$Leader %in% names0 & ed$Follower %in% names0 &
+             ed$Leader != ed$Follower, , drop = FALSE]
+    for (i in seq_len(nrow(ed))) {
+        a <- ed$Leader[i]; b <- ed$Follower[i]
+        w[a, b] <- w[a, b] + ed$WCD[i]
+        w[b, a] <- w[b, a] + ed$WCD[i]
+    }
+
+    strength <- rowSums(w)
+    p <- w
+    connected <- strength > 0
+    if (any(connected)) p[connected, ] <- w[connected, , drop = FALSE] / strength[connected]
+    indirect <- p %*% p
+    diag(indirect) <- 0
+    constraint <- rowSums((p + indirect)^2)
+    constraint[!connected] <- NA_real_
+    c_top1 <- unname(constraint[top1])
+    sci <- if (is.finite(c_top1)) max(0, min(1, 1 - c_top1)) else NA_real_
+    value_col <- if ("maturity_value" %in% names(nodes)) "maturity_value" else "value"
+    data.frame(name = top1, value = suppressWarnings(as.numeric(nodes[[value_col]][match(top1, names0)])),
+               Burt_constraint = c_top1,
+               SCI = sci, SCI_percent = 100 * sci, stringsAsFactors = FALSE)
+}
 
 # --------------------------
-# 2.5) Modularity Q (by cluster) on final Top-20 after major sampling
+# 2.5) Modularity Q (by cluster) on the final 20-23 node sample
 #   - returns per-cluster contribution Q_cluster and global Q_total
 #   - uses undirected aggregation of Leader/Follower with weight WCD
 # --------------------------
 # --------------------------
-# 2.5) Modularity Q (by cluster) on final Top-20 after major sampling
+# 2.5) Modularity Q (by cluster) on the final 20-23 node sample
 #   - returns per-cluster contribution for:
 #       * Qw_cluster (weighted, using WCD)
 #       * Qu_cluster (unweighted, each undirected edge = 1)
@@ -1553,13 +1659,15 @@ run_flca_ms_sil_runner <- function(nodes, edges0, cfg = list(), verbose = TRUE) 
   cfg <- modifyList(
     list(
       top_clusters = 5, base_per_cluster = 4, target_n = 20,
-      intra_delta = 2, inter_delta = 5, eps = 1e-9
+      intra_delta = 2, inter_delta = 5, eps = 1e-9,
+      cluster_by = "value"
     ),
     cfg
   )
 
   # A) normalize inputs
   nodes  <- normalize_nodes(nodes)
+  nodes  <- prepare_nodes_for_flca_mode(nodes, cluster_by = cfg$cluster_by)
   edges0 <- normalize_edges(edges0)
 
   nodes_in <- nodes[, intersect(c("name", "value", "value2"), names(nodes)), drop = FALSE]
@@ -1605,7 +1713,7 @@ if ("Target" %in% names(data0) && !("Follower" %in% names(data0))) {
 
 
 
-  fl  <- tryCatch(FLCA_run(list(nodes=nodes, data=data0)), error=function(e) e)
+  fl  <- tryCatch(FLCA_run(list(nodes=nodes, data=data0), cluster_by = cfg$cluster_by), error=function(e) e)
  
 # ---- Robust guard (minimal) ----
 if (inherits(fl, "error")) {
@@ -1652,17 +1760,27 @@ edges_fl <- as_LFW(edges_raw)
     nodes_full, edges0,
     top_clusters = cfg$top_clusters,
     base_per_cluster = cfg$base_per_cluster,
-    target_n = cfg$target_n
+    target_n = cfg$target_n,
+    cluster_by = cfg$cluster_by,
+    max_per_cluster = cfg$max_per_cluster %||% 4
   )
   nodes20 <- ms$nodes
   edges20 <- as_LFW(ms$data)
-  # ensure nodes20$value matches edge sums on the SAME edge set used later
-  nodes20 <- compute_node_values_from_edges(nodes20, edges20, keep_diag = TRUE)
+  top1_sci <- compute_top1_sci(nodes20, edges20, cluster_by = cfg$cluster_by)
+  # V40: preserve the original nodes$value and nodes$value2 supplied by the
+  # Data-tab node table.  Do NOT recompute node values from the filtered edge set,
+  # because that can make the SSplot/chord/Sankey disagree with the node table
+  # and can hide high-value leaders (e.g., Germany, Mexico, United States).
+  if (!"maturity_value" %in% names(nodes20)) nodes20$maturity_value <- nodes20$value
+  if (!"influence_value2" %in% names(nodes20)) nodes20$influence_value2 <- nodes20$value2
+  if (!"flca_score" %in% names(nodes20)) nodes20$flca_score <- if (identical(cfg$cluster_by, "value2")) nodes20$influence_value2 else nodes20$maturity_value
+  nodes20$value <- suppressWarnings(as.numeric(nodes20$value)); nodes20$value[!is.finite(nodes20$value)] <- 0
+  nodes20$value2 <- suppressWarnings(as.numeric(nodes20$value2)); nodes20$value2[!is.finite(nodes20$value2)] <- 0
 
 
   
-  # D) direction by value for SS stage (Leader/Follower/WCD) - single link per follower (NO ties)
-  edges20_dir <- preprocess_edges(nodes20, edges20, verbose = FALSE)
+  # D) direction by selected FLCA score for SS stage (Leader/Follower/WCD) - single link per follower (NO ties)
+  edges20_dir <- preprocess_edges(nodes20, edges20, verbose = FALSE, cluster_by = cfg$cluster_by)
   # preprocess_edges returns columns: Leader, follower, WCD  -> harmonize to Leader, Follower, WCD
   edges20_dir <- as.data.frame(edges20_dir, stringsAsFactors = FALSE)
   if ("follower" %in% names(edges20_dir) && !("Follower" %in% names(edges20_dir))) {
@@ -1671,15 +1789,16 @@ edges_fl <- as_LFW(edges_raw)
   edges20_dir <- edges20_dir[, intersect(c("Leader","Follower","WCD"), names(edges20_dir)), drop = FALSE]
 
 
-  # E) Silhouette + a*
+  # E) Silhouette + a* on the full induced original network
   sil_df <- compute_silhouette_df(
-    nodes20, edges20_dir,
+    nodes20, edges20,
     intra_delta = cfg$intra_delta,
     inter_delta = cfg$inter_delta,
     eps = cfg$eps
   )
 
   modes <- merge(nodes20, sil_df, by = "name", all.x = TRUE)
+  modes$SCI <- ifelse(modes$name == top1_sci$name, top1_sci$SCI, NA_real_)
 
   # force non-NA
   if ("ssi" %in% names(modes))     modes$ssi[!is.finite(modes$ssi)] <- 0
@@ -1689,11 +1808,11 @@ edges_fl <- as_LFW(edges_raw)
   if (!("SSi" %in% names(modes)) && "ssi" %in% names(modes)) modes$SSi <- modes$ssi
   if (!("a_star" %in% names(modes)) && "a_star1" %in% names(modes)) modes$a_star <- modes$a_star1
 
-# F) Modularity Q on final Top-20 (by cluster + global)
+# F) Modularity Q on the final 20-23 node sample (by cluster + global)
 #    - Qw: weighted by WCD
 #    - Qu: unweighted (each unique undirected edge = 1)
 mod_tbl <- tryCatch(
-  compute_modularity_by_cluster(modes, edges20_dir, eps = cfg$eps),
+  compute_modularity_by_cluster(modes, edges20, eps = cfg$eps),
   error = function(e) NULL
 )
 
@@ -1730,7 +1849,7 @@ if (is.data.frame(mod_tbl) && nrow(mod_tbl) > 0) {
 
   if (isTRUE(verbose)) {
     cat("\n[CHECK] Top-3 nodes20:\n")
-    keep <- intersect(c("name","value","value2","carac","ssi","a_star1","SSi","a_star"), names(modes))
+    keep <- intersect(c("name","value","value2","maturity_value","influence_value2","flca_score","flca_cluster_by","carac","ssi","a_star1","SSi","a_star"), names(modes))
     print(utils::head(modes[, keep, drop = FALSE], 3))
   }
 
@@ -1744,5 +1863,6 @@ if (is.data.frame(mod_tbl) && nrow(mod_tbl) > 0) {
   }
 
   list(modes = modes, data = edges20_dir, nodes_full = nodes_full, edges_fl = edges_fl,
-       modularity_by_cluster = mod_tbl)
+       modularity_by_cluster = mod_tbl, top1_sci = top1_sci,
+       edges_induced = edges20, edges = edges20, tree_edges = edges20_dir)
 }

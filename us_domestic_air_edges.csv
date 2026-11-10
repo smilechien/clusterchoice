@@ -1,0 +1,189 @@
+Leader,Follower,WCD
+Hartsfield Jackson Atlanta International Airport,General Edward Lawrence Logan International Airport,8
+Hartsfield Jackson Atlanta International Airport,Charlotte Douglas International Airport,8
+Hartsfield Jackson Atlanta International Airport,Ronald Reagan Washington National Airport,7
+Hartsfield Jackson Atlanta International Airport,Denver International Airport,11
+Hartsfield Jackson Atlanta International Airport,Dallas Fort Worth International Airport,11
+Hartsfield Jackson Atlanta International Airport,Detroit Metropolitan Wayne County Airport,8
+Hartsfield Jackson Atlanta International Airport,Newark Liberty International Airport,7
+Hartsfield Jackson Atlanta International Airport,Washington Dulles International Airport,9
+Hartsfield Jackson Atlanta International Airport,George Bush Intercontinental Houston Airport,10
+Hartsfield Jackson Atlanta International Airport,Harry Reid International Airport,7
+Hartsfield Jackson Atlanta International Airport,Los Angeles International Airport,10
+Hartsfield Jackson Atlanta International Airport,Orlando International Airport,8
+Hartsfield Jackson Atlanta International Airport,Minneapolis-St Paul International/Wold-Chamberlain Airport,8
+Hartsfield Jackson Atlanta International Airport,Chicago O'Hare International Airport,20
+Hartsfield Jackson Atlanta International Airport,Philadelphia International Airport,9
+Hartsfield Jackson Atlanta International Airport,Phoenix Sky Harbor International Airport,9
+Hartsfield Jackson Atlanta International Airport,Seattle Tacoma International Airport,6
+Hartsfield Jackson Atlanta International Airport,San Francisco International Airport,11
+Hartsfield Jackson Atlanta International Airport,Salt Lake City International Airport,6
+Charlotte Douglas International Airport,General Edward Lawrence Logan International Airport,3
+Ronald Reagan Washington National Airport,General Edward Lawrence Logan International Airport,3
+Denver International Airport,General Edward Lawrence Logan International Airport,3
+Dallas Fort Worth International Airport,General Edward Lawrence Logan International Airport,4
+Detroit Metropolitan Wayne County Airport,General Edward Lawrence Logan International Airport,2
+Newark Liberty International Airport,General Edward Lawrence Logan International Airport,2
+Washington Dulles International Airport,General Edward Lawrence Logan International Airport,2
+George Bush Intercontinental Houston Airport,General Edward Lawrence Logan International Airport,1
+Harry Reid International Airport,General Edward Lawrence Logan International Airport,2
+Los Angeles International Airport,General Edward Lawrence Logan International Airport,7
+Orlando International Airport,General Edward Lawrence Logan International Airport,3
+Minneapolis-St Paul International/Wold-Chamberlain Airport,General Edward Lawrence Logan International Airport,2
+Chicago O'Hare International Airport,General Edward Lawrence Logan International Airport,5
+Philadelphia International Airport,General Edward Lawrence Logan International Airport,3
+Phoenix Sky Harbor International Airport,General Edward Lawrence Logan International Airport,3
+Seattle Tacoma International Airport,General Edward Lawrence Logan International Airport,3
+San Francisco International Airport,General Edward Lawrence Logan International Airport,3
+Salt Lake City International Airport,General Edward Lawrence Logan International Airport,1
+Charlotte Douglas International Airport,Ronald Reagan Washington National Airport,2
+Denver International Airport,Charlotte Douglas International Airport,2
+Dallas Fort Worth International Airport,Charlotte Douglas International Airport,2
+Detroit Metropolitan Wayne County Airport,Charlotte Douglas International Airport,3
+Charlotte Douglas International Airport,Newark Liberty International Airport,3
+Charlotte Douglas International Airport,Washington Dulles International Airport,3
+Charlotte Douglas International Airport,George Bush Intercontinental Houston Airport,3
+Harry Reid International Airport,Charlotte Douglas International Airport,2
+Charlotte Douglas International Airport,Los Angeles International Airport,2
+Charlotte Douglas International Airport,Orlando International Airport,4
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Charlotte Douglas International Airport,3
+Chicago O'Hare International Airport,Charlotte Douglas International Airport,3
+Charlotte Douglas International Airport,Philadelphia International Airport,2
+Charlotte Douglas International Airport,Phoenix Sky Harbor International Airport,2
+Charlotte Douglas International Airport,Seattle Tacoma International Airport,2
+Charlotte Douglas International Airport,San Francisco International Airport,2
+Charlotte Douglas International Airport,Salt Lake City International Airport,3
+Denver International Airport,Ronald Reagan Washington National Airport,2
+Dallas Fort Worth International Airport,Ronald Reagan Washington National Airport,2
+Detroit Metropolitan Wayne County Airport,Ronald Reagan Washington National Airport,3
+Ronald Reagan Washington National Airport,Newark Liberty International Airport,1
+George Bush Intercontinental Houston Airport,Ronald Reagan Washington National Airport,1
+Harry Reid International Airport,Ronald Reagan Washington National Airport,2
+Los Angeles International Airport,Ronald Reagan Washington National Airport,4
+Ronald Reagan Washington National Airport,Orlando International Airport,3
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Ronald Reagan Washington National Airport,4
+Chicago O'Hare International Airport,Ronald Reagan Washington National Airport,3
+Philadelphia International Airport,Ronald Reagan Washington National Airport,2
+Ronald Reagan Washington National Airport,Phoenix Sky Harbor International Airport,2
+Ronald Reagan Washington National Airport,Seattle Tacoma International Airport,1
+Ronald Reagan Washington National Airport,San Francisco International Airport,2
+Salt Lake City International Airport,Ronald Reagan Washington National Airport,1
+Denver International Airport,Dallas Fort Worth International Airport,5
+Denver International Airport,Detroit Metropolitan Wayne County Airport,5
+Denver International Airport,Newark Liberty International Airport,2
+Denver International Airport,Washington Dulles International Airport,3
+Denver International Airport,George Bush Intercontinental Houston Airport,3
+Denver International Airport,Harry Reid International Airport,5
+Denver International Airport,Los Angeles International Airport,7
+Denver International Airport,Orlando International Airport,4
+Denver International Airport,Minneapolis-St Paul International/Wold-Chamberlain Airport,6
+Chicago O'Hare International Airport,Denver International Airport,4
+Denver International Airport,Philadelphia International Airport,5
+Denver International Airport,Phoenix Sky Harbor International Airport,7
+Denver International Airport,Seattle Tacoma International Airport,6
+Denver International Airport,San Francisco International Airport,4
+Denver International Airport,Salt Lake City International Airport,5
+Dallas Fort Worth International Airport,Detroit Metropolitan Wayne County Airport,4
+Dallas Fort Worth International Airport,Newark Liberty International Airport,3
+Dallas Fort Worth International Airport,Washington Dulles International Airport,3
+Dallas Fort Worth International Airport,George Bush Intercontinental Houston Airport,3
+Dallas Fort Worth International Airport,Harry Reid International Airport,3
+Dallas Fort Worth International Airport,Los Angeles International Airport,6
+Dallas Fort Worth International Airport,Orlando International Airport,3
+Dallas Fort Worth International Airport,Minneapolis-St Paul International/Wold-Chamberlain Airport,5
+Chicago O'Hare International Airport,Dallas Fort Worth International Airport,4
+Dallas Fort Worth International Airport,Philadelphia International Airport,3
+Dallas Fort Worth International Airport,Phoenix Sky Harbor International Airport,3
+Dallas Fort Worth International Airport,Seattle Tacoma International Airport,3
+Dallas Fort Worth International Airport,San Francisco International Airport,5
+Dallas Fort Worth International Airport,Salt Lake City International Airport,3
+Detroit Metropolitan Wayne County Airport,Newark Liberty International Airport,2
+Detroit Metropolitan Wayne County Airport,Washington Dulles International Airport,2
+Detroit Metropolitan Wayne County Airport,George Bush Intercontinental Houston Airport,3
+Detroit Metropolitan Wayne County Airport,Harry Reid International Airport,3
+Detroit Metropolitan Wayne County Airport,Los Angeles International Airport,3
+Detroit Metropolitan Wayne County Airport,Orlando International Airport,2
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Detroit Metropolitan Wayne County Airport,1
+Chicago O'Hare International Airport,Detroit Metropolitan Wayne County Airport,4
+Detroit Metropolitan Wayne County Airport,Philadelphia International Airport,3
+Detroit Metropolitan Wayne County Airport,Phoenix Sky Harbor International Airport,4
+Detroit Metropolitan Wayne County Airport,Seattle Tacoma International Airport,1
+Detroit Metropolitan Wayne County Airport,San Francisco International Airport,1
+Detroit Metropolitan Wayne County Airport,Salt Lake City International Airport,1
+Washington Dulles International Airport,Newark Liberty International Airport,1
+George Bush Intercontinental Houston Airport,Newark Liberty International Airport,1
+Harry Reid International Airport,Newark Liberty International Airport,1
+Los Angeles International Airport,Newark Liberty International Airport,2
+Orlando International Airport,Newark Liberty International Airport,2
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Newark Liberty International Airport,2
+Chicago O'Hare International Airport,Newark Liberty International Airport,3
+Philadelphia International Airport,Newark Liberty International Airport,2
+Phoenix Sky Harbor International Airport,Newark Liberty International Airport,4
+Seattle Tacoma International Airport,Newark Liberty International Airport,3
+Newark Liberty International Airport,San Francisco International Airport,2
+Salt Lake City International Airport,Newark Liberty International Airport,1
+George Bush Intercontinental Houston Airport,Washington Dulles International Airport,1
+Harry Reid International Airport,Washington Dulles International Airport,1
+Los Angeles International Airport,Washington Dulles International Airport,4
+Washington Dulles International Airport,Orlando International Airport,1
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Washington Dulles International Airport,2
+Chicago O'Hare International Airport,Washington Dulles International Airport,1
+Philadelphia International Airport,Washington Dulles International Airport,1
+Washington Dulles International Airport,Phoenix Sky Harbor International Airport,1
+Washington Dulles International Airport,Seattle Tacoma International Airport,1
+Washington Dulles International Airport,San Francisco International Airport,2
+Harry Reid International Airport,George Bush Intercontinental Houston Airport,2
+George Bush Intercontinental Houston Airport,Los Angeles International Airport,5
+George Bush Intercontinental Houston Airport,Orlando International Airport,2
+Minneapolis-St Paul International/Wold-Chamberlain Airport,George Bush Intercontinental Houston Airport,3
+Chicago O'Hare International Airport,George Bush Intercontinental Houston Airport,4
+George Bush Intercontinental Houston Airport,Philadelphia International Airport,3
+George Bush Intercontinental Houston Airport,Phoenix Sky Harbor International Airport,3
+George Bush Intercontinental Houston Airport,Seattle Tacoma International Airport,4
+George Bush Intercontinental Houston Airport,San Francisco International Airport,2
+George Bush Intercontinental Houston Airport,Salt Lake City International Airport,2
+Harry Reid International Airport,Los Angeles International Airport,9
+Harry Reid International Airport,Orlando International Airport,2
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Harry Reid International Airport,3
+Chicago O'Hare International Airport,Harry Reid International Airport,4
+Harry Reid International Airport,Philadelphia International Airport,4
+Harry Reid International Airport,Phoenix Sky Harbor International Airport,4
+Harry Reid International Airport,Seattle Tacoma International Airport,4
+Harry Reid International Airport,San Francisco International Airport,4
+Harry Reid International Airport,Salt Lake City International Airport,3
+Los Angeles International Airport,Orlando International Airport,6
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Los Angeles International Airport,7
+Chicago O'Hare International Airport,Los Angeles International Airport,7
+Philadelphia International Airport,Los Angeles International Airport,3
+Los Angeles International Airport,Phoenix Sky Harbor International Airport,6
+Los Angeles International Airport,Seattle Tacoma International Airport,5
+Los Angeles International Airport,San Francisco International Airport,7
+Salt Lake City International Airport,Los Angeles International Airport,7
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Orlando International Airport,4
+Chicago O'Hare International Airport,Orlando International Airport,4
+Philadelphia International Airport,Orlando International Airport,4
+Phoenix Sky Harbor International Airport,Orlando International Airport,4
+Seattle Tacoma International Airport,Orlando International Airport,2
+Orlando International Airport,San Francisco International Airport,2
+Salt Lake City International Airport,Orlando International Airport,1
+Chicago O'Hare International Airport,Minneapolis-St Paul International/Wold-Chamberlain Airport,5
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Philadelphia International Airport,3
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Phoenix Sky Harbor International Airport,6
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Seattle Tacoma International Airport,5
+Minneapolis-St Paul International/Wold-Chamberlain Airport,San Francisco International Airport,5
+Minneapolis-St Paul International/Wold-Chamberlain Airport,Salt Lake City International Airport,1
+Chicago O'Hare International Airport,Philadelphia International Airport,3
+Chicago O'Hare International Airport,Phoenix Sky Harbor International Airport,3
+Chicago O'Hare International Airport,Seattle Tacoma International Airport,4
+Chicago O'Hare International Airport,San Francisco International Airport,5
+Chicago O'Hare International Airport,Salt Lake City International Airport,4
+Philadelphia International Airport,Phoenix Sky Harbor International Airport,4
+Philadelphia International Airport,Seattle Tacoma International Airport,3
+Philadelphia International Airport,San Francisco International Airport,4
+Philadelphia International Airport,Salt Lake City International Airport,3
+Phoenix Sky Harbor International Airport,Seattle Tacoma International Airport,5
+Phoenix Sky Harbor International Airport,San Francisco International Airport,4
+Salt Lake City International Airport,Phoenix Sky Harbor International Airport,4
+Seattle Tacoma International Airport,San Francisco International Airport,6
+Salt Lake City International Airport,Seattle Tacoma International Airport,4
+Salt Lake City International Airport,San Francisco International Airport,2
